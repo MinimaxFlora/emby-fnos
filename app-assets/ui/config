@@ -1,0 +1,14 @@
+{
+    ".url": {
+        "emby.Application": {
+            "title": "Emby",
+            "desc": "EmbyServer是一款软件媒体系统，可让您控制媒体的管理和流式传输。可以通过多个应用程序将专用服务器中的媒体提供给最终用户设备。",
+            "icon": "images/{0}.png",
+            "type": "url",
+            "protocol": "http",
+            "port": "8096",
+            "url": "/web/index.html",
+            "allUsers": true
+        }
+    }
+}

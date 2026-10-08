@@ -1,0 +1,174 @@
+name: Build fnOS packages
+
+# 在 Linux runner 上构建两个架构的原生 fpk。
+#
+# 为什么 CI 用 Linux 而不是 Windows：
+#   本机（Windows）构建必须绕一大圈 —— Windows 建不了符号链接、WSL 建的链接
+#   Windows 工具又读不了，所以负载里的 soname 别名被解引用成实体文件，
+#   再由安装脚本在 NAS 上重建。Linux runner 上这一切都不存在，
+#   但本项目已经收敛到「负载只放实体文件 + 库目录按实测拆分」的方案
+#   （见 build/split_libs.py），所以 Linux 构建与本机产出一致，
+#   而且不需要 WSL 这一层。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      emby_version:
+        description: Emby 版本
+        default: 4.10.1.0
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            emby_arch: amd64
+            platform: x86
+            deb_arch: amd64
+          - arch: arm
+            emby_arch: arm64
+            platform: arm
+            deb_arch: arm64
+
+    name: ${{ matrix.arch }} (${{ matrix.emby_arch }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖（Pillow 仅用于图标校验）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pillow
+
+      - name: 下载 fnpack（官方 Linux 构建）
+        run: |
+          set -euo pipefail
+          mkdir -p _tools
+          curl -fsSL -o _tools/fnpack \
+            https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64
+          chmod +x _tools/fnpack
+          file _tools/fnpack
+          ./_tools/fnpack --version || ./_tools/fnpack version || true
+
+      - name: 准备官方 deb
+        run: |
+          set -euo pipefail
+          mkdir -p _work
+          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
+          URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${VERSION}/emby-server-deb_${VERSION}_${{ matrix.deb_arch }}.deb"
+          echo "下载 $URL"
+          curl -fsSL --retry 3 -o "_work/emby-${{ matrix.emby_arch }}.deb" "$URL"
+          python build/extract_deb.py \
+            --deb "_work/emby-${{ matrix.emby_arch }}.deb" \
+            --out "_work/deb-${{ matrix.emby_arch }}"
+
+      - name: 导出官方镜像树
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
+          python build/export_image_tree.py \
+            --arch ${{ matrix.emby_arch }} \
+            --tag "${VERSION}-${{ matrix.emby_arch }}" \
+            --out "_work/image-${{ matrix.emby_arch }}"
+
+      - name: 组装负载（含库目录拆分）
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
+          python build/build_native.py \
+            --arch ${{ matrix.emby_arch }} \
+            --image-root "_work/image-${{ matrix.emby_arch }}" \
+            --deb-root "_work/deb-${{ matrix.emby_arch }}/opt/emby-server" \
+            --out "emby/app" \
+            --version "$VERSION" \
+            --bundle
+          python build/split_libs.py --app-dir emby/app
+
+      - name: 叠加自有文件并渲染 manifest
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
+          cp -a app-assets/bin app-assets/ui emby/app/
+          chmod +x emby/app/bin/emby-server
+          # manifest 每次从模板渲染：就地改写会把占位符吃掉，第二次构建就失败
+          sed -e "s/@PLATFORM@/${{ matrix.platform }}/" \
+              -e "s/@APPVERSION@/${VERSION}/" \
+              emby/manifest.template > emby/manifest
+          grep -q '@' emby/manifest && { echo "manifest 仍有未替换占位符"; exit 1; } || true
+          echo "--- manifest ---"
+          cat emby/manifest
+
+      - name: 自检（负载里不能有随包 libc/loader）
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in libc.so.6 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 \
+                   libstdc++.so.6 libm.so.6 libgcc_s.so.1; do
+            if [ -e "emby/app/lib/$f" ] || [ -e "emby/app/system/$f" ]; then
+              echo "FAIL 随包 $f 未剔除：会覆盖系统库并导致段错误"
+              fail=1
+            fi
+          done
+          for f in system/EmbyServer system/libcoreclr.so system/libsqlite3.so \
+                   system/libSkiaSharp.so system/libvips.so.42 \
+                   bin/emby-server bin/ffmpeg lib/libavcodec.so.59.37.100 ui/config; do
+            [ -e "emby/app/$f" ] || { echo "FAIL 缺少 $f"; fail=1; }
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          echo "负载自检通过，共 $(find emby/app -type f | wc -l) 个文件"
+
+      - name: 校验官方图标（必须透明背景）
+        run: python build/fetch_official_icons.py --check
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
+          mkdir -p dist _work/fpk-out
+          # fnpack 把 fpk 写到当前工作目录，所以先切进去
+          cd _work/fpk-out
+          "$GITHUB_WORKSPACE/_tools/fnpack" build --directory "$GITHUB_WORKSPACE/emby"
+          ls -la
+          FPK=$(ls *.fpk | head -1)
+          OUT="$GITHUB_WORKSPACE/dist/emby_${VERSION}_${{ matrix.arch }}_native.fpk"
+          mv "$FPK" "$OUT"
+          ls -lh "$OUT"
+
+      - name: 回归测试
+        run: bash build/test-native.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fpk-${{ matrix.arch }}
+          path: dist/*.fpk
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 汇总并发布
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.fpk
+          generate_release_notes: true

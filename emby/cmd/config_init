@@ -1,0 +1,7 @@
+#!/bin/bash
+# 配置变更前：无操作
+# 实现见 cmd/service-setup，这里只做入口转发。
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=service-setup
+. "${DIR}/service-setup"
+service_preconfig "$@"

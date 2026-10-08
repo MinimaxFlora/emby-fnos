@@ -1,0 +1,203 @@
+#!/bin/bash
+# =============================================================================
+#  Emby for fnOS — 原生启动脚本
+#
+#  在真实飞牛机器（Debian 12 / glibc 2.36）上反复实测后确定的启动方式：
+#
+#    /lib64/ld-linux-x86-64.so.2 --library-path <app>/system <app>/system/EmbyServer ...
+#
+#  为什么必须这样做，三个都是实测踩出来的：
+#
+#  1) EmbyServer 是 .NET apphost，它的 ELF PT_INTERP 写死为
+#     /lib/ld-linux-x86-64.so.2。Debian 12 用的是 multiarch 布局，
+#     该路径不存在（只有 /lib64/ld-linux-x86-64.so.2 -> /lib/x86_64-linux-gnu/...），
+#     于是直接执行会报 “No such file or directory”——看着像文件缺失，其实是没有加载器。
+#     所以这里显式用系统加载器启动。
+#
+#  2) 加载器必须放在 apphost **同目录**。若用绝对路径调用加载器，
+#     .NET 会去“加载器所在目录”找 EmbyServer.dll（报
+#     “The application to execute does not exist: /usr/lib/x86_64-linux-gnu/EmbyServer.dll”）。
+#     因此先把系统加载器复制/软链到 system/ 再以相对路径调用。
+#
+#  3) library-path 只允许包含 <app>/system，**绝不能**包含随包的 lib/。
+#     镜像自带的 libc 是 crosstool-NG 2.34，比 Debian 12 的 glibc 2.36 旧，
+#     一旦进入搜索路径就会让整个进程段错误（连 /bin/bash 都会崩）。
+#     系统库完全够用（libc/libstdc++/libgcc_s/libm/libdl/libpthread 都有），
+#     .NET 运行时与 Emby 的原生依赖（sqlite3/SkiaSharp/vips 等）都放在 system/ 里。
+#
+#  另外刻意不用 export LD_LIBRARY_PATH：那会影响所有子进程（实测把 ldd、bash
+#  都带崩了），只用 --library-path 把作用域限制在 EmbyServer 自身。
+#
+#  前台运行但**不 exec**：先写 PID 文件让调用方能立刻拿到进程号，然后原地等待
+#  进程结束并把退出码原样返回。
+# =============================================================================
+
+APP_DIR="${TRIM_APPDEST:?缺少 TRIM_APPDEST}"
+DATA_DIR="${TRIM_PKGVAR:?缺少 TRIM_PKGVAR}"
+PID_FILE="${DATA_DIR}/emby.pid"
+LAUNCHER_LOG="${DATA_DIR}/emby.log"
+SYSTEM_DIR="${APP_DIR}/system"
+
+# 排障钩子：EMBY_LAUNCHER_TRACE=<文件路径> 输出执行轨迹
+if [ -n "${EMBY_LAUNCHER_TRACE:-}" ]; then
+    exec 9>>"${EMBY_LAUNCHER_TRACE}"
+    export BASH_XTRACEFD=9
+    set -x
+fi
+
+mkdir -p "${DATA_DIR}" 2>/dev/null || true
+
+note() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [emby-launcher] $*" >> "${LAUNCHER_LOG}" 2>/dev/null
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 运行时环境
+# ---------------------------------------------------------------------------
+export PATH="${APP_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export EMBY_DATA="${DATA_DIR}"
+
+[ -d "${APP_DIR}/etc/fonts" ] && export FONTCONFIG_PATH="${APP_DIR}/etc/fonts"
+[ -f "${APP_DIR}/etc/ssl/certs/ca-certificates.crt" ] && \
+    export SSL_CERT_FILE="${APP_DIR}/etc/ssl/certs/ca-certificates.crt"
+
+# 硬件转码：驱动目录 = 系统 + 随包（随包只提供驱动，不提供 libc）
+_va_dirs="${APP_DIR}/lib/dri"
+for _d in /usr/lib/x86_64-linux-gnu/dri /usr/lib/aarch64-linux-gnu/dri \
+          /usr/lib/dri /lib/dri; do
+    [ -d "${_d}" ] && _va_dirs="${_va_dirs}:${_d}"
+done
+[ -n "${EMBY_EXTRA_VA_DIRS:-}" ] && _va_dirs="${_va_dirs}:${EMBY_EXTRA_VA_DIRS}"
+export LIBVA_DRIVERS_PATH="${_va_dirs}"
+unset _va_dirs _d
+
+for _ocl in "${APP_DIR}/etc/OpenCL/vendors" /usr/share/OpenCL/vendors /etc/OpenCL/vendors; do
+    [ -d "${_ocl}" ] && OCL_ICD_VENDORS="${OCL_ICD_VENDORS:-}${OCL_ICD_VENDORS:+:}${_ocl}"
+done
+[ -n "${OCL_ICD_VENDORS:-}" ] && export OCL_ICD_VENDORS
+unset _ocl
+
+[ -f "${APP_DIR}/share/libdrm/amdgpu.ids" ] && export AMDGPU_IDS="${APP_DIR}/share/libdrm/amdgpu.ids"
+[ -f "${APP_DIR}/share/hwdata/pci.ids" ] && export PCI_IDS_PATH="${APP_DIR}/share/hwdata/pci.ids"
+export XDG_CACHE_HOME="${DATA_DIR}/cache"
+
+export IGNORE_VAAPI_ENABLED_FLAG=true
+export NEOReadDebugKeys=1
+export OverrideGpuAddressSpace=48
+
+cd "${APP_DIR}" || exit 1
+
+# ---------------------------------------------------------------------------
+# 找一个可用的系统动态加载器（GNU ld.so）
+#   必须是 GNU loader：crosstool-NG 那套不读 ld.so.cache，找不到系统库。
+# ---------------------------------------------------------------------------
+find_loader() {
+    local n
+    # 优先 multiarch 布局下的真实文件，其次常见兼容路径
+    for n in /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 \
+             /lib64/ld-linux-x86-64.so.2 \
+             /lib/ld-linux-x86-64.so.2 \
+             /lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 \
+             /lib64/ld-linux-aarch64.so.1 \
+             /lib/ld-linux-aarch64.so.1; do
+        [ -e "${n}" ] && { printf '%s' "${n}"; return 0; }
+    done
+    return 1
+}
+
+LOADER="$(find_loader || true)"
+
+# 加载器就位到 apphost 同目录：.NET 会按「加载器所在目录」找 EmbyServer.dll，
+# 所以必须让加载器与 EmbyServer 同目录，并以相对路径调用。
+LOCAL_LOADER="${SYSTEM_DIR}/ld-linux-x86-64.so.2"
+case "$(uname -m 2>/dev/null)" in
+    aarch64|arm64) LOCAL_LOADER="${SYSTEM_DIR}/ld-linux-aarch64.so.1" ;;
+esac
+
+if [ -n "${LOADER}" ]; then
+    # 必须是**实体副本**，不能是软链：实测软链会让 .NET apphost 解析错目录，
+    # 报 "The application to execute does not exist: /usr/lib/x86_64-linux-gnu/EmbyServer.dll"
+    # —— apphost 似乎按 /proc/self/exe 的实体路径找 dll，而软链会指到加载器本体所在目录。
+    # 加载器只有 200 多 KB，复制成本可忽略。
+    if [ ! -f "${LOCAL_LOADER}" ]; then
+        if cp -f "${LOADER}" "${LOCAL_LOADER}" 2>/dev/null; then
+            note "已复制系统加载器到 system/ <- ${LOADER}"
+        else
+            note "警告：无法复制加载器到 ${LOCAL_LOADER}"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 参数
+# ---------------------------------------------------------------------------
+# ffmpeg / ffprobe / ffdetect 同为共享链接且 PT_INTERP 缺失，需要包一层用系统
+# 加载器拉起，并指向随包 lib/ 里的 libav*。
+#
+# 包装脚本由 **安装阶段**（cmd/service-setup 的 service_preinst）生成：
+# 应用安装目录是只读卷，启动阶段无法在 bin/ 下创建文件（实测 mv/写入直接失败）。
+# 这里只做校验，缺失时给出可读的告警。
+for _t in ffmpeg ffprobe ffdetect; do
+    if [ -x "${APP_DIR}/bin/${_t}.real" ]; then
+        :   # 包装已就位
+    elif [ -f "${APP_DIR}/bin/${_t}" ]; then
+        note "提示：bin/${_t} 尚未包装（可能安装未完成），转码相关功能可能不可用"
+    fi
+done
+unset _t
+
+ARGS=(
+    -programdata "${DATA_DIR}"
+    -ffdetect "${APP_DIR}/bin/ffdetect"
+    -ffmpeg "${APP_DIR}/bin/ffmpeg"
+    -ffprobe "${APP_DIR}/bin/ffprobe"
+    -restartexitcode 3
+    -pidfile "${PID_FILE}"
+    -ignore_vaapi_enabled_flag
+)
+
+# 注意：Emby **没有** -httpport 命令行参数（已从 EmbyServer.dll 里核实，
+# 只有 -programdata / -nolocalportconfig 等）。端口只认 config/system.xml 里的
+# HttpServerPortNumber。若飞牛的 TRIM_SERVICE_PORT 与配置不一致（用户在应用中心
+# 改过端口），飞牛按新端口做转发，Emby 却还在老端口上听 —— 表现为「服务起来了
+# 但打不开」。因此这里在启动前把配置对齐。
+# 真正的改写由 cmd/common.sh 的 sync_http_port 完成（启动阶段调用）。
+
+SHARE_DIR="/var/apps/${TRIM_APPNAME:-emby}/shares/${TRIM_APPNAME:-emby}"
+[ -d "${SHARE_DIR}" ] && ARGS+=(-defaultdirectory "${SHARE_DIR}")
+
+# ---------------------------------------------------------------------------
+# 启动并原地等待
+# ---------------------------------------------------------------------------
+if [ -x "${LOCAL_LOADER}" ] || [ -L "${LOCAL_LOADER}" ]; then
+    # 相对路径调用：让 .NET 在 system/ 目录里找到 EmbyServer.dll
+    ( cd "${SYSTEM_DIR}" && exec "./$(basename "${LOCAL_LOADER}")" \
+        --library-path "${SYSTEM_DIR}" "./EmbyServer" "${ARGS[@]}" ) &
+elif [ -n "${LOADER}" ]; then
+    note "警告：加载器未能放入 system/，回退为绝对路径调用（可能找不到 EmbyServer.dll）"
+    "${LOADER}" --library-path "${SYSTEM_DIR}" "${SYSTEM_DIR}/EmbyServer" "${ARGS[@]}" &
+else
+    note "警告：未找到系统加载器，尝试直接执行（PT_INTERP 缺失时必然失败）"
+    "${SYSTEM_DIR}/EmbyServer" "${ARGS[@]}" &
+fi
+child=$!
+
+# 让出一次调度：若 EmbyServer 立刻失败，不要留下指向死进程的 PID 文件。
+# 用 command kill 而非 kill：生命周期环境里可能残留同名 shell 函数，
+# 直接调用会命中函数而不是真实命令（实测踩过）。
+sleep 1
+if ! command kill -0 "${child}" 2>/dev/null; then
+    wait "${child}"
+    rc=$?
+    rm -f "${PID_FILE}" 2>/dev/null || true
+    exit "${rc}"
+fi
+
+echo "${child}" > "${PID_FILE}" 2>/dev/null || true
+
+wait "${child}"
+rc=$?
+
+rm -f "${PID_FILE}" 2>/dev/null || true
+exit "${rc}"

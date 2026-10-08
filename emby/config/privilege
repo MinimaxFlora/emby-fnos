@@ -1,0 +1,8 @@
+{
+    "defaults": {
+        "run-as": "package"
+    },
+    "username": "EmbyServer",
+    "groupname": "EmbyServer",
+    "join-groups": ["video", "render"]
+}

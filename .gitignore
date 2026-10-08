@@ -1,0 +1,33 @@
+# 构建产物
+dist/
+build/stage-*/
+build/stage-native-*/
+*.fpk
+
+# 构建中间素材（deb / 镜像层导出，体积数 GB，按需重新下载）
+_work/
+
+# 构建时生成的程序体负载（约 1.6 GB，由 build_native.py 组装）
+emby/app/
+emby/provenance*.json
+
+# 构建工具（体积大，自行从官方下载；CI 会自动拉取）
+_tools/
+
+# 参考资料与本地排查产物（官方包、截图、图标缓存）
+_ref/
+
+# Python
+__pycache__/
+*.pyc
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# 本地凭据（绝不允许提交）
+.env
+*.token
+.nas-credentials

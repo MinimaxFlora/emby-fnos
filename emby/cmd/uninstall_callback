@@ -1,0 +1,7 @@
+#!/bin/bash
+# 卸载后：按用户选择决定是否清除 Emby 数据目录
+# 实现见 cmd/service-setup，这里只做入口转发。
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=service-setup
+. "${DIR}/service-setup"
+service_postuninstall "$@"

@@ -1,0 +1,25 @@
+[{
+    "stepTitle": "卸载 Emby",
+    "items": [
+        {
+            "type": "tips",
+            "helpText": "卸载 Emby 不会影响你授权给它的媒体文件夹，原始影视文件始终安全。"
+        },
+        {
+            "type": "radio",
+            "field": "wizard_delete_data",
+            "label": "是否删除 Emby 自身的程序数据（媒体库配置、刮削元数据、用户账号）？",
+            "initValue": "false",
+            "options": [
+                {
+                    "label": "保留数据（推荐，日后重装可无缝恢复）",
+                    "value": "false"
+                },
+                {
+                    "label": "删除全部 Emby 数据（不可恢复）",
+                    "value": "true"
+                }
+            ]
+        }
+    ]
+}]

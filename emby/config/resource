@@ -1,0 +1,19 @@
+{
+    "port-config": {
+        "protocol-file": "emby.sc"
+    },
+    "data-share": {
+        "shares": [
+            {
+                "name": "emby",
+                "permission": {
+                    "rw": [
+                        "emby"
+                    ]
+                }
+            }
+        ]
+    },
+    "systemd-unit": {
+    }
+}

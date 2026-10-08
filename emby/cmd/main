@@ -1,0 +1,43 @@
+#!/bin/bash
+# =============================================================================
+#  Emby for fnOS — 运行控制（原生进程，非 Docker）
+#    start  : 准备目录、应用会员预激活、拉起 EmbyServer 原生进程
+#    stop   : 优雅停止，超时后强制结束
+#    status : 0 = 运行中，3 = 未运行
+# =============================================================================
+
+EMBY_MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+. "${EMBY_MAIN_DIR}/common.sh"
+
+case "$1" in
+    start)
+        prepare_dirs
+        # 幂等：升级或异常后可能丢了链接，启动前兜一次，保证动态链接器能找到 soname
+        restore_symlinks >/dev/null 2>&1 || log "警告：符号链接恢复不完整"
+        # 端口对齐必须在 Emby 起来之前做：Emby 没有命令行端口参数，
+        # 只认 config/system.xml，飞牛却按 TRIM_SERVICE_PORT 做转发。
+        sync_http_port
+        apply_license
+        check_extensions
+        publish_media_list
+        if ! start_emby; then
+            exit 1
+        fi
+        exit 0
+        ;;
+    stop)
+        stop_emby || exit 1
+        exit 0
+        ;;
+    status)
+        if is_running; then
+            exit 0
+        fi
+        exit 3
+        ;;
+    *)
+        log "未知命令：$1"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,7 @@
+#!/bin/bash
+# 安装前：准备数据目录、写入会员授权状态、落盘向导媒体目录
+# 实现见 cmd/service-setup，这里只做入口转发。
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=service-setup
+. "${DIR}/service-setup"
+service_preinst "$@"

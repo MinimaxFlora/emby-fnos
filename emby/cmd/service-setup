@@ -1,0 +1,138 @@
+#!/bin/bash
+# =============================================================================
+#  Emby for fnOS — 生命周期挂钩（原生版）
+#  由飞牛的 appcenter 在对应时机 source 后调用其中的函数。
+# =============================================================================
+
+EMBY_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+. "${EMBY_SETUP_DIR}/common.sh"
+
+# 安装：建目录、恢复符号链接、写会员授权、落盘向导选项。
+service_preinst() {
+    log "开始安装 Emby 原生版（架构：${TRIM_SYS_ARCH:-unknown}，版本：${TRIM_APPVER:-unknown}）"
+
+    prepare_dirs
+
+    # 关键步骤：包内只有实体文件（Windows 构建链无法携带符号链接），
+    # 必须在 NAS 上用原生 ln -s 把 soname 别名补回来，否则 Emby 起不来。
+    restore_symlinks || log "警告：部分符号链接未能恢复，启动可能失败"
+    verify_runtime_libs || log "警告：随包运行时库不完整"
+
+    # 在只读安装目录里生成 ffmpeg/ffprobe/ffdetect 的加载器包装。
+    # 必须在安装阶段做：启动时应用目录已只读，写不进去（实测失败）。
+    install_tool_wrappers
+
+    # 把系统动态加载器复制到 system/：EmbyServer 的 PT_INTERP 指向
+    # /lib/ld-linux-x86-64.so.2，Debian 12 上该路径不存在，必须显式调用加载器。
+    local _loader _ld_name
+    _loader="$(find_system_loader || true)"
+    if [ -n "${_loader}" ]; then
+        case "$(uname -m 2>/dev/null)" in
+            aarch64|arm64) _ld_name="ld-linux-aarch64.so.1" ;;
+            *)             _ld_name="ld-linux-x86-64.so.2" ;;
+        esac
+        if [ ! -f "${EMBY_HOME}/system/${_ld_name}" ]; then
+            if cp -f "${_loader}" "${EMBY_HOME}/system/${_ld_name}" 2>/dev/null; then
+                log "已复制系统加载器 -> system/${_ld_name}"
+            else
+                log "警告：无法复制加载器到 system/（${_loader}）"
+            fi
+        fi
+    else
+        log "警告：系统没有可用的 GNU 动态加载器"
+    fi
+
+    if [ -x "${EMBY_BIN}" ]; then
+        log "程序体已就位：${EMBY_HOME}/system/EmbyServer"
+    else
+        log "警告：未找到 ${EMBY_BIN}，启动会失败"
+    fi
+
+    # 会员预激活
+    apply_license
+
+    # 向导里填了媒体目录就落盘，作为共享授权的补充
+    if [ -n "${wizard_media_dirs:-}" ]; then
+        printf '%s\n' "${wizard_media_dirs}" | tr ',;' '\n\n' | sed 's/\r$//' \
+            > "${EMBY_STATE_DIR}/media_dirs.txt"
+        log "已保存自定义媒体目录"
+    fi
+
+    check_extensions
+    return 0
+}
+
+service_postinst() {
+    publish_media_list
+    log "Emby 安装完成。首次启动约需 10～30 秒，然后访问 http://<NAS-IP>:${TRIM_SERVICE_PORT:-8096} 完成初始化。"
+    return 0
+}
+
+service_preupgrade() {
+    log "准备升级 Emby：${TRIM_OLD_APPVER:-?} -> ${TRIM_APPVER:-?}"
+    # 停止旧进程，程序目录会被整体替换
+    stop_emby || true
+    prepare_dirs
+    return 0
+}
+
+service_postupgrade() {
+    # 升级会替换整个 target 目录，符号链接需要重建
+    restore_symlinks || log "警告：部分符号链接未能恢复"
+    verify_runtime_libs || true
+    # 会员授权与增强脚本每次升级后重新确认一次，避免丢失
+    apply_license
+    check_extensions
+    publish_media_list
+    log "Emby 升级完成"
+    return 0
+}
+
+service_preuninstall() {
+    log "正在卸载 Emby"
+    stop_emby || true
+    return 0
+}
+
+service_postuninstall() {
+    if [ "${wizard_delete_data:-false}" = "true" ]; then
+        log "按用户选择清除 Emby 数据目录"
+        rm -rf "${EMBY_DATA}" 2>/dev/null || true
+    else
+        log "保留 Emby 数据目录（媒体库配置、刮削元数据、用户账号）"
+    fi
+    return 0
+}
+
+service_preconfig() {
+    return 0
+}
+
+# “应用设置”里改动配置后：刷新媒体目录清单，必要时重启服务
+service_postconfig() {
+    log "应用配置已更新"
+    prepare_dirs
+
+    if [ -n "${wizard_media_dirs:-}" ]; then
+        printf '%s\n' "${wizard_media_dirs}" | tr ',;' '\n\n' | sed 's/\r$//' \
+            > "${EMBY_STATE_DIR}/media_dirs.txt"
+    else
+        rm -f "${EMBY_STATE_DIR}/media_dirs.txt" 2>/dev/null || true
+    fi
+    publish_media_list
+
+    # 新增授权目录后重启 Emby，让媒体库扫描立即能看到新路径
+    if is_running; then
+        log "正在重启 Emby 以应用新配置…"
+        if stop_emby && start_emby; then
+            log "Emby 已按新配置重启完成"
+        else
+            log "自动重启失败，请在应用中心手动停止后再启动"
+            return 1
+        fi
+    else
+        log "Emby 当前未运行，下次启动会使用新配置"
+    fi
+    return 0
+}

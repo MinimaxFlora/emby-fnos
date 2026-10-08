@@ -1,0 +1,15 @@
+appname=emby
+version=@APPVERSION@
+display_name=Emby
+desc=EmbyServer是一款软件媒体系统，可让您控制媒体的管理和流式传输。可以通过多个应用程序将专用服务器中的媒体提供给最终用户设备。（amilys/embyserver 开心版，原生安装）
+source=thirdparty
+platform=@PLATFORM@
+maintainer=amilys
+maintainer_url=https://hub.docker.com/r/amilys/embyserver
+distributor=MinimaxFlora
+desktop_uidir=ui
+desktop_applaunchname=emby.Application
+service_port=8096
+checkport=false
+ctl_stop=true
+changelog=Emby @APPVERSION@ 原生版：基于 amilys/embyserver 运行时（含会员预激活与弹幕/美化/外部播放增强），支持 x86 与 arm64 硬件转码。
