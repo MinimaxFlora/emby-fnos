@@ -161,30 +161,52 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 授权预置数据：值来自仓库 Secret / Variable，仓库里没有明文。
+      # Secret 的格式与随包的 config/license.json 一致（含 filename/state/hosts），
+      # 这里原样落到文件即可；Variable 里的 hosts 若设了就覆盖。
       # 未配置时生成空配置，后续步骤会跳过注入，构建照常成功。
       # -----------------------------------------------------------------------
       - name: 注入授权预置数据（来自 Secrets / Variables）
         env:
-          LICENSE_STATE: ${{ secrets.EMBY_LICENSE_JSON }}
+          LICENSE_JSON: ${{ secrets.EMBY_LICENSE_JSON }}
           LICENSE_HOSTS: ${{ vars.EMBY_LICENSE_HOSTS }}
         run: |
           set -euo pipefail
           mkdir -p emby/config
-          # 用 python 组 JSON，避免 shell 引号把内容弄坏
+          # 用 python 解析，避免 shell 引号把 JSON 弄坏
           python3 - <<'PY'
           import json, os
-          state = (os.environ.get("LICENSE_STATE") or "").strip()
-          hosts = (os.environ.get("LICENSE_HOSTS") or "").strip()
-          if not state:
+
+          raw = (os.environ.get("LICENSE_JSON") or "").strip()
+          hosts_var = (os.environ.get("LICENSE_HOSTS") or "").strip()
+
+          if not raw:
               print("::warning::未配置 EMBY_LICENSE_JSON，将构建不带授权预置数据的包")
               raise SystemExit(0)
-          cfg = {"state": state}
-          if hosts:
-              cfg["hosts"] = hosts
+
+          # Secret 里存的就是 config/license.json 的内容；但为了容错，
+          # 如果它不是合法 JSON 对象（例如只贴了一段 state 文本），就当成 state。
+          try:
+              cfg = json.loads(raw)
+              if not isinstance(cfg, dict):
+                  raise ValueError
+          except Exception:
+              cfg = {"state": raw}
+
+          # 必填字段体检：state 缺失或为空时报警，避免静默产出无授权的包
+          if not (cfg.get("state") or "").strip():
+              print("::warning::EMBY_LICENSE_JSON 里没有可用的 state 字段")
+          if not (cfg.get("filename") or "").strip():
+              print("::warning::EMBY_LICENSE_JSON 里没有 filename，将不会写入状态文件")
+          if hosts_var:
+              cfg["hosts"] = hosts_var
+
           with open("emby/config/license.json", "w", encoding="utf-8") as f:
               json.dump(cfg, f, ensure_ascii=False)
-          print(f"已生成 emby/config/license.json（state {len(state)} 字符，"
-                f"hosts {'有' if hosts else '无'}）")
+
+          print(f"已生成 emby/config/license.json："
+                f"filename {'有' if cfg.get('filename') else '无'}、"
+                f"state {len(cfg.get('state') or '')} 字符、"
+                f"hosts {'有' if cfg.get('hosts') else '无'}")
           PY
 
       - name: 准备官方 deb
