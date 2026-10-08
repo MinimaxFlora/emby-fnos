@@ -209,6 +209,51 @@ jobs:
                 f"hosts {'有' if cfg.get('hosts') else '无'}")
           PY
 
+      - name: 校验授权预置数据结构
+        run: |
+          set -euo pipefail
+          if [ ! -f emby/config/license.json ]; then
+            echo "未配置授权预置数据，跳过校验"
+            exit 0
+          fi
+          # 坏掉的配置必须在这里就失败，不能等到装到 NAS 上才发现
+          python3 - <<'PY'
+          import json, sys
+
+          d = json.load(open("emby/config/license.json", encoding="utf-8"))
+          if not isinstance(d, dict):
+              sys.exit("license.json 顶层不是对象")
+          print(f"顶层 keys: {list(d.keys())}")
+
+          fn = (d.get("filename") or "").strip()
+          st = (d.get("state") or "").strip()
+
+          problems = []
+          if not fn:
+              problems.append("缺少 filename")
+          if not st:
+              problems.append("缺少 state")
+          else:
+              # state 本身必须是一段合法 JSON —— 这能抓住「Secret 被转义破坏」
+              # 这类问题（实测踩过：引号被 shell/PowerShell 吃掉后整段变成非法 JSON）
+              try:
+                  inner = json.loads(st)
+                  if not isinstance(inner, dict):
+                      problems.append("state 不是 JSON 对象")
+                  else:
+                      print(f"state 内层 keys: {list(inner.keys())}")
+              except Exception as exc:
+                  problems.append(f"state 不是合法 JSON：{exc}")
+          if "/" in fn or fn in (".", ".."):
+              problems.append(f"filename 含路径分隔符：{fn}")
+
+          if problems:
+              for p in problems:
+                  print(f"::error::授权预置数据有问题：{p}")
+              sys.exit(1)
+          print("授权预置数据结构正确")
+          PY
+
       - name: 准备官方 deb
         env:
           VERSION: ${{ needs.detect.outputs.version }}

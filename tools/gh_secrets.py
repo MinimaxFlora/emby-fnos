@@ -128,10 +128,28 @@ def main() -> int:
     # set
     value = args.value
     if args.value_file:
+        # 优先从文件读：PowerShell 向 native exe 传递含转义的 JSON 参数时
+        # 会破坏内容（实测把 {"a":"{\"b\":1}"} 传成了去掉引号的版本），
+        # 所以带嵌套的 JSON 一定用 --value-file。
         with open(args.value_file, encoding="utf-8") as f:
             value = f.read()
     if not value:
         raise SystemExit("请用 --value 或 --value-file 提供值")
+
+    # 名字里带 LICENSE 之类的值时，先校验是不是合法 JSON，
+    # 免得把一个坏掉的值推进去、直到构建产物不对才发现。
+    if "JSON" in name.upper():
+        import json as _json
+        try:
+            parsed = _json.loads(value)
+        except Exception as exc:  # noqa: BLE001
+            print(f"拒绝写入：{name} 不是合法 JSON（{exc}）")
+            return 1
+        keys = list(parsed.keys()) if isinstance(parsed, dict) else f"<{type(parsed).__name__}>"
+        print(f"  校验通过：合法 JSON，顶层 keys = {keys}")
+        if isinstance(parsed, dict):
+            for k, v in parsed.items():
+                print(f"    {k:10} {len(str(v))} 字符")
 
     if kind == "secret":
         st, pk = call(f"/repos/{REPO}/actions/secrets/public-key", token)
