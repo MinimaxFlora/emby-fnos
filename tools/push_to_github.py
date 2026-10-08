@@ -195,8 +195,10 @@ def main() -> int:
         url = f"https://github.com/{full}.git"
         git("remote", "remove", "origin", cwd=root, check=False)
         git("remote", "add", "origin", url, cwd=root)
-        r = git("push", "-u", "origin", "main",
-                "-c", "credential.helper=", cwd=root, env=env, check=False)
+        # 注意：git 的全局选项（-c）必须放在子命令**之前**，
+        # 写成 `git push -c ...` 会被当成 push 的参数而报用法错误。
+        r = git("-c", "credential.helper=", "push", "-u", "origin", "main",
+                cwd=root, env=env, check=False)
         print(r.stdout)
         if r.returncode != 0:
             print(r.stderr)
