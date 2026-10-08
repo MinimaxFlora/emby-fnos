@@ -321,7 +321,7 @@ jobs:
           "$GITHUB_WORKSPACE/_tools/fnpack" build --directory "$GITHUB_WORKSPACE/emby"
           ls -la
           FPK=$(ls *.fpk | head -1)
-          OUT="$GITHUB_WORKSPACE/dist/emby_${VERSION}_${{ matrix.arch }}_native.fpk"
+          OUT="$GITHUB_WORKSPACE/dist/emby_${VERSION}_${{ matrix.arch }}.fpk"
           mv "$FPK" "$OUT"
           ls -lh "$OUT"
 
@@ -404,8 +404,8 @@ jobs:
 
           | 包 | 架构 |
           |---|---|
-          | \`emby_${VERSION}_x86_native.fpk\` | x86_64 |
-          | \`emby_${VERSION}_arm_native.fpk\` | ARM64 |
+          | \`emby_${VERSION}_x86.fpk\` | x86_64 |
+          | \`emby_${VERSION}_arm.fpk\` | ARM64 |
 
           安装：应用中心 → 手动安装 → 选择对应架构的 \`.fpk\`。
 

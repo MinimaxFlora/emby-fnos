@@ -6,8 +6,8 @@
 
 | 产物 | 架构 | 飞牛 `platform` | 来源运行时 | FPK 体积 | 解包后 |
 |---|---|---|---|---|---|
-| `dist/emby_4.10.1.0_x86_native.fpk` | x86_64 | `x86` | amd64 | 458.4 MB | 1180 MB |
-| `dist/emby_4.10.1.0_arm_native.fpk` | ARM64 | `arm` | arm64 | 196.3 MB | 520 MB |
+| `dist/emby_4.10.1.0_x86.fpk` | x86_64 | `x86` | amd64 | 458.4 MB | 1180 MB |
+| `dist/emby_4.10.1.0_arm.fpk` | ARM64 | `arm` | arm64 | 196.3 MB | 520 MB |
 
 > ✅ **x86 包已在真实飞牛 NAS（Debian 12 / glibc 2.36）上完整验证**：安装 → 启动 → 监听端口 → HTTP 200，10 秒内就绪，13 个硬解编码器可用。
 
@@ -154,8 +154,8 @@ Emby 长期以 root 常驻，飞牛文档还专门提醒过 `privilege` 里同�
 下载地址固定为：
 
 ```
-https://github.com/MinimaxFlora/emby-fnos/releases/download/<版本号>/emby_<版本号>_x86_native.fpk
-https://github.com/MinimaxFlora/emby-fnos/releases/download/<版本号>/emby_<版本号>_arm_native.fpk
+https://github.com/MinimaxFlora/emby-fnos/releases/download/<版本号>/emby_<版本号>_x86.fpk
+https://github.com/MinimaxFlora/emby-fnos/releases/download/<版本号>/emby_<版本号>_arm.fpk
 ```
 上游一发新版本，第二天的定时任务就会自动产出对应的包。
 
@@ -311,7 +311,7 @@ wsl -e bash -lc "cd /mnt/d/.../emby && bash build/build_payload.sh all"
 3. [WSL] build_native.py 合并两者为 app/ 负载（链接解引用为实体文件）
 4. [WSL] 覆盖 app-assets/（启动脚本 + 桌面入口 + 官方图标）
 5. [Win] 渲染 manifest、放 links.tsv、行尾归一化、硬断言
-6. [Win] fnpack build -> dist/emby_<版本>_<arch>_native.fpk
+6. [Win] fnpack build -> dist/emby_<版本>_<arch>.fpk
 ```
 
 ### 校验

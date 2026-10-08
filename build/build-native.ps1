@@ -31,7 +31,7 @@
 #     powershell -ExecutionPolicy Bypass -File build\build-native.ps1 -SkipFetch
 #     powershell -ExecutionPolicy Bypass -File build\build-native.ps1 -SkipPayloadBuild
 #
-#  Output: dist\emby_VERSION_ARCH_native.fpk
+#  Output: dist\emby_VERSION_ARCH.fpk
 # =============================================================================
 [CmdletBinding()]
 param(
@@ -267,7 +267,7 @@ foreach ($t in $targets) {
     }
     if (-not $fpk) { throw ('fnpack produced no fpk; checked ' + $packDir + ' and ' + $SrcPkg) }
 
-    $outName = 'emby_' + $EmbyVersion + '_' + $t + '_native.fpk'
+    $outName = 'emby_' + $EmbyVersion + '_' + $t + '.fpk'
     $outPath = Join-Path $DistDir $outName
     Move-Item $fpk.FullName $outPath -Force
     $sizeMB = [math]::Round((Get-Item $outPath).Length / 1MB, 1)
