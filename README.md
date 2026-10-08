@@ -183,6 +183,24 @@ CI 把它落成 `emby/config/license.json`（该路径已 `.gitignore`），随�
 **没有配置这两个值时构建依然成功**，只是产出的包不含预置授权数据 ——
 fork 之后自己编译的人也能得到可正常安装、登录、使用的包。
 
+#### 设置 Secret 时注意转义
+
+`EMBY_LICENSE_JSON` 的值里**含嵌套的引号**，用命令行直接传会被 shell 吃掉。
+实测在 PowerShell 里这样传：
+
+```powershell
+python tools/gh_secrets.py set-secret EMBY_LICENSE_JSON --value '{"filename":"...","state":"{\"a\":1}"}'
+# 实际存进去的是 {filename:...,state:{a:1}} —— 引号全没了，已不是合法 JSON
+```
+
+结果是构建照常成功、但包里是一份**坏掉的配置**，直到装到机器上才发现。
+所以：
+
+* **用 `--value-file` 从文件读**（推荐），文件用编辑器或脚本生成即可
+* `gh_secrets.py` 在写入前会先校验是不是合法 JSON，不合法直接拒绝
+* CI 里还有一道「校验授权预置数据结构」步骤，`state` 内层解析失败会让**构建失败**
+  而不是产出坏包
+
 本机构建同理：自己写一份 `emby/config/license.json` 即可，格式：
 
 ```json
