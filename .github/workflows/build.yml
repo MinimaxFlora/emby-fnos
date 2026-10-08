@@ -355,7 +355,7 @@ jobs:
   #
   #  不需要手动打 tag：push / 定时 / 手动触发都会走到这里，
   #  用「上游版本号」作为 tag；同名 tag 已存在就先删掉再重建，
-  #  这样上游一更新就自动产出对应版本，并且 latest 永远指向最新稳定版。
+  #  这样上游一更新就自动产出对应版本。
   # ---------------------------------------------------------------------------
   release:
     needs: [detect, build]
@@ -414,13 +414,4 @@ jobs:
           )" \
             release/*.fpk
 
-          # latest 指针：始终指向最新稳定版
-          if gh release view latest >/dev/null 2>&1; then
-            gh release delete latest --yes --cleanup-tag || true
-          fi
-          gh release create latest \
-            --title "Emby for 飞牛 fnOS（最新稳定版）" \
-            --notes "当前为 **Emby ${VERSION}**。固定版本的说明见 \`${TAG}\`。" \
-            release/*.fpk
-
-          echo "已发布 ${TAG} 与 latest"
+          echo "已发布 ${TAG}"

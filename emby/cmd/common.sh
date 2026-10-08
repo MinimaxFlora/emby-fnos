@@ -133,14 +133,19 @@ verify_runtime_libs() {
 # ---------------------------------------------------------------------------
 # 为 ffmpeg / ffprobe / ffdetect 生成加载器包装
 #
-# 为什么必须在安装时做（而不是启动时）：
-#   * 应用安装目录是只读卷，启动阶段无法在 bin/ 下创建文件（实测 mv/写入失败）
-#   * 这三个二进制与 EmbyServer 一样：PT_INTERP 写死 /lib/ld-linux-x86-64.so.2，
-#     在 Debian 12 的 multiarch 布局下不存在；且它们是共享链接的，需要随包
-#     lib/ 里的 libav*（不能塞进 system/，那是 Emby 的搜索目录）
+# 为什么需要：
+#   这三个二进制与 EmbyServer 一样，PT_INTERP 写死 /lib/ld-linux-x86-64.so.2，
+#   而 Debian 12 用 multiarch 布局、该路径不存在 —— 直接执行会 ENOENT，
+#   在 Emby 日志里表现为 `Win32Exception (2): An error occurred trying to start
+#   process '/vol1/@appcenter/emby/bin/ffmpeg'`，转码直接不可用。
+#   而且它们是共享链接的，需要随包 lib/ 里的 libav*。
 #
 # 做法：原文件改名为 <tool>.real，放一个包装脚本占原位置，
 # 包装脚本用系统加载器 --library-path <app>/lib:<app>/bin 拉起 .real。
+#
+# **时机很重要**：函数幂等、可重复调用，但必须在 bin/ 已经铺好之后调用。
+# 实测 service_preinst 阶段 bin/ 往往还没就位，此时会一件都处理不了且静默通过；
+# 所以 service_postinst / service_postupgrade / main start 三处都要兜底调用。
 # ---------------------------------------------------------------------------
 WRAPPED_TOOLS="ffmpeg ffprobe ffdetect"
 
@@ -162,24 +167,29 @@ install_tool_wrappers() {
     loader="$(find_system_loader || true)"
     [ -n "${loader}" ] || log "警告：找不到系统动态加载器，ffmpeg/ffprobe/ffdetect 可能无法执行"
 
-    local made=0 skipped=0
+    local made=0 already=0 waiting=0 failed=0
     for tool in ${WRAPPED_TOOLS}; do
         real="${EMBY_HOME}/bin/${tool}.real"
         wrap="${EMBY_HOME}/bin/${tool}"
 
         if [ -x "${real}" ]; then
-            skipped=$((skipped + 1))      # 已包装过（升级场景）
+            already=$((already + 1))      # 已包装过（升级或重复调用）
             continue
         fi
-        [ -f "${wrap}" ] || continue
+        if [ ! -f "${wrap}" ]; then
+            # 二进制还没铺好 —— 不是错误，调用方会在更晚的阶段重试
+            waiting=$((waiting + 1))
+            continue
+        fi
         if ! mv -f "${wrap}" "${real}" 2>/dev/null; then
-            log "警告：无法把 bin/${tool} 改名为 .real（目录只读？）"
+            log "警告：无法把 bin/${tool} 改名为 .real（目录不可写？）"
+            failed=$((failed + 1))
             continue
         fi
 
         cat > "${wrap}" <<WRAPPER
 #!/bin/bash
-# Emby for fnOS：${tool} 的启动包装（安装时由 cmd/common.sh 生成）。
+# Emby for fnOS：${tool} 的启动包装（由 cmd/common.sh 生成）。
 # 原因：该二进制的 PT_INTERP 写死 /lib/ld-linux-x86-64.so.2，Debian 12 上不存在；
 # 且它是共享链接的，需要随包 lib/ 里的 libav* 库。这里用系统加载器显式拉起，
 # 并用 --library-path 把作用域限制在本次调用，避免污染全局库搜索路径。
@@ -194,8 +204,18 @@ WRAPPER
         chmod +x "${wrap}" 2>/dev/null || true
         made=$((made + 1))
     done
-    log "转码工具包装：新建 ${made}，已就位 ${skipped}"
-    return 0
+
+    local msg="转码工具包装：新建 ${made}，已就位 ${already}"
+    [ "${waiting}" -gt 0 ] && msg="${msg}，待铺好 ${waiting}"
+    [ "${failed}" -gt 0 ] && msg="${msg}，失败 ${failed}"
+    log "${msg}"
+
+    # 全部待铺好说明调用时机过早，明确说出来便于排查
+    [ "${waiting}" -gt 0 ] && [ "${made}" -eq 0 ] && [ "${already}" -eq 0 ] \
+        && log "提示：bin/ 下尚无待包装的二进制，稍后会在安装/启动阶段重试"
+
+    # 有工具存在但没包装成功才算失败
+    [ "${failed}" -eq 0 ]
 }
 
 # ---------------------------------------------------------------------------

@@ -19,8 +19,13 @@ service_preinst() {
     restore_symlinks || log "警告：部分符号链接未能恢复，启动可能失败"
     verify_runtime_libs || log "警告：随包运行时库不完整"
 
-    # 在只读安装目录里生成 ffmpeg/ffprobe/ffdetect 的加载器包装。
-    # 必须在安装阶段做：启动时应用目录已只读，写不进去（实测失败）。
+    # 在安装目录里生成 ffmpeg/ffprobe/ffdetect 的加载器包装。
+    #
+    # 时机很关键：实测 service_preinst 里 bin/ 往往**还没就位**（飞牛在这个阶段
+    # 只铺了一部分文件），此时 install_tool_wrappers 会静默地一件都处理不了，
+    # 结果 Emby 调用 ffmpeg 时因为 PT_INTERP 缺失直接 ENOENT。
+    # 因此这里只做一次尝试，真正的兜底放在 postinst / postupgrade / start 三处，
+    # 并且函数本身幂等、可重复调用。
     install_tool_wrappers
 
     # 把系统动态加载器复制到 system/：EmbyServer 的 PT_INTERP 指向
@@ -64,6 +69,9 @@ service_preinst() {
 }
 
 service_postinst() {
+    # 兜底重试：此时程序体一定已经完整铺好，包装必然能生成。
+    # 这是修复「ffmpeg 报 ENOENT」的关键一步（preinst 阶段 bin/ 常常还没就位）。
+    install_tool_wrappers
     publish_media_list
     log "Emby 安装完成。首次启动约需 10～30 秒，然后访问 http://<NAS-IP>:${TRIM_SERVICE_PORT:-8096} 完成初始化。"
     return 0
@@ -78,9 +86,10 @@ service_preupgrade() {
 }
 
 service_postupgrade() {
-    # 升级会替换整个 target 目录，符号链接需要重建
+    # 升级会替换整个 target 目录，符号链接与工具包装都需要重建
     restore_symlinks || log "警告：部分符号链接未能恢复"
     verify_runtime_libs || true
+    install_tool_wrappers
     # 会员授权与增强脚本每次升级后重新确认一次，避免丢失
     apply_license
     check_extensions

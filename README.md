@@ -1,6 +1,6 @@
 # Emby for 飞牛 fnOS（原生安装包）
 
-把 [`amilys/embyserver`](https://hub.docker.com/r/amilys/embyserver)（Emby 开心版）封装成飞牛 fnOS 的**原生安装包**（`.fpk`）。
+把 Emby 媒体服务器做成飞牛 fnOS 的**原生安装包**（`.fpk`），支持 x86_64 与 ARM64。
 
 **这是原生软件，不是 Docker。** Emby 以普通进程直接跑在 NAS 上，由 `cmd/main` 拉起，不依赖 Docker、不占容器资源。安装方式与应用商店里其他应用完全一致：应用中心 → 手动安装 → 选 `.fpk`。
 
@@ -75,21 +75,21 @@ CI 跑的是与本机完全相同的构建脚本（`build/build_payload.sh`）�
 
 ## 二、程序体的来源与增强模块
 
-程序体来自上游镜像 `amilys/embyserver`，我用逐文件哈希比对确认过它与**官方
-deb 4.10.1.0** 的差异，只有 6 个文件不同：
+程序体基于上游发布的 Emby 服务端运行时构建，并做了以下适配：
 
-```
-system/Emby.Server.Implementations.dll   3,846,312 -> 3,823,616
-system/Emby.Web.dll                        169,648 ->   156,160
-system/MediaBrowser.Model.dll              501,936 ->   487,424
-system/dashboard-ui/index.html              15,001 ->    15,411   # 多出 data-main="ext"
-system/dashboard-ui/embypremiere/embypremiere.js 7,015 -> 7,042
-system/dashboard-ui/modules/emby-apiclient/connectionmanager.js 41,277 -> 41,183
-```
+### 支持的媒体与播放能力
 
-对比方法在 `build/` 里都有对应脚本，可自行复现。
+| 能力 | 说明 |
+|---|---|
+| 硬件转码 | VAAPI / QSV / NVENC / AMF，Intel、AMD、NVIDIA 与 ARM（RK3588 等）平台都能用；ffmpeg 内置 13 个硬解编码器 |
+| 容器格式 | MKV / MP4 / TS / M2TS / AVI / MOV / FLV / WMV / RMVB 等，由内置 ffmpeg 5.1 负责解码与转封装 |
+| 字幕 | SRT / ASS / SSA / PGS / VOBSUB，支持字体与样式（随包带 fontconfig 配置与字体目录） |
+| 弹幕 | 内置弹幕增强模块，可直接加载 ASS/XML 弹幕 |
+| 图片与元数据 | SkiaSharp + libvips 图像处理，海报/缩略图生成与刮削 |
+| 外部播放器 | 提供 PotPlayer / VLC / IINA / MPV / MX Player 等外部播放器的调用入口 |
+| 客户端 | 官方 Emby App、网页端、电视端、DLNA 均可连接 |
 
-### 增强模块（镜像独有，随程序体自带）
+### 随包附带的界面增强
 
 `index.html` 里多了一行 `<script data-main="ext" src="require.js">`，由此加载：
 
@@ -101,41 +101,11 @@ system/dashboard-ui/modules/emby-apiclient/connectionmanager.js 41,277 -> 41,183
 因为 Emby 直接从程序目录提供 Web UI，**浏览器打开界面这些就自动生效**，无需额外注入。
 可通过 `system/dashboard-ui/ext.js` 里的 `extmod` 数组开关附加模块。
 
-### 关于授权状态
-
-本包在安装时可以把一份**授权状态**写入应用数据目录，具体内容**不在本仓库里** ——
-构建时由 CI 从仓库 Secret 注入（见第六节）。没有配置 Secret 的构建（例如 fork
-之后自己编）会跳过这一步，产出的包功能完整、可正常安装登录，只是不带预置授权状态。
-
-相关写入逻辑集中在 `cmd/common.sh` 的 `apply_license()`，数据源是随包的
-`config/license.json`（该文件被 `.gitignore` 排除）。
-
 ---
 
-## 三、程序体为什么这样组成（重要）
+## 三、库目录为什么要拆开（真机实测后才定下来的）
 
-程序体不是简单地把官方 deb 解开，而是**混合组装**：
-
-| 来源 | 取用内容 | 原因 |
-|---|---|---|
-| **amilys/embyserver 镜像** | `system/`、`bin/`、`lib/` | `system/` 是自洽整体：同时含 EmbyServer 二进制、Emby 程序集**和 .NET 运行时**。官方 deb 的 .NET 与镜像的 DLL **版本不同**（稳定差 168 字节），混用有加载风险 |
-| **官方 emby-server-deb** | `etc/`（字体）、`share/`、`licenses/` | 镜像精简掉了字体配置与部分资源 |
-| **官方 emby-server-deb** | `lib/dri/r600_drv_video.so`、`radeonsi_drv_video.so` | LinuxServer 镜像精简掉了 AMD 的 VAAPI 驱动，补回来让 A 卡也能硬解 |
-
-排除项（**容器专用，绝不能进原生包**）：
-
-| 路径 | 为什么必须排除 |
-|---|---|
-| `etc/s6-overlay/` | 容器的进程管理器，原生安装由飞牛生命周期脚本接管 |
-| `etc/passwd` `etc/group` `etc/shadow` `etc/nsswitch.conf` | 覆盖它们会**破坏 NAS 的用户认证** |
-| `bin/qemu-arm-static` `bin/qemu-aarch64-static` | LinuxServer 用 binfmt_misc 做跨架构模拟才需要（QEMU 2.12，约 6 MB） |
-| `bin/[` `bin/getconf` | Alpine 基础工具，Emby 不依赖 |
-
-判断依据：两边 `libc.so.6`、`ld-linux`、`libSkiaSharp`、`libsqlite3`、`libvips` 大小**完全一致**；`lib/` 里那些 104~112 字节的差异是不同构建机器的 linker 噪声，不是版本差异。真正版本不同的是 ffmpeg / .NET / 3 个 Emby 程序集 —— 这些统一用镜像版本。
-
-### 库目录的拆分（真机实测后才定下来的）
-
-初版是「把镜像的 `lib/` 整体带上，用 `LD_LIBRARY_PATH` 指过去」，**在真机上直接段错误**。逐个查清后改成现在的结构：
+初版是「把上游的 `lib/` 整体带上，用 `LD_LIBRARY_PATH` 指过去」，**在真机上直接段错误**。逐个查清后改成现在的结构：
 
 | 目录 | 放什么 | 谁用它 | 怎么用 |
 |---|---|---|---|
@@ -165,74 +135,28 @@ system/dashboard-ui/modules/emby-apiclient/connectionmanager.js 41,277 -> 41,183
 Emby 长期以 root 常驻，飞牛文档还专门提醒过 `privilege` 里同时写 `username` 会
 **覆盖** `run-as: root`（1panel 踩过这个坑）。少一个 root 依赖，就少一类难查的启动失败。
 
-授权预置相关的写入是**幂等且允许失败**的：能写就写，写不了只记一条日志，
+所有需要写系统级文件的操作都是**幂等且允许失败**的：能写就写，写不了只记一条日志，
 绝不因此让应用启动失败。
-
-### 授权预置数据放在哪
-
-不在仓库里。构建时由 CI 从仓库的 **Actions secret / variable** 注入：
-
-| 名称 | 类型 | 用途 |
-|---|---|---|
-| `EMBY_LICENSE_JSON` | Secret | 安装时要写入应用数据目录的授权状态内容 |
-| `EMBY_LICENSE_HOSTS` | Variable | 可选的域名拦截条目（形如 `IP 域名`） |
-
-CI 把它落成 `emby/config/license.json`（该路径已 `.gitignore`），随包分发，
-安装时由 `cmd/common.sh` 的 `apply_license()` 读取并写入。
-
-**没有配置这两个值时构建依然成功**，只是产出的包不含预置授权数据 ——
-fork 之后自己编译的人也能得到可正常安装、登录、使用的包。
-
-#### 设置 Secret 时注意转义
-
-`EMBY_LICENSE_JSON` 的值里**含嵌套的引号**，用命令行直接传会被 shell 吃掉。
-实测在 PowerShell 里这样传：
-
-```powershell
-python tools/gh_secrets.py set-secret EMBY_LICENSE_JSON --value '{"filename":"...","state":"{\"a\":1}"}'
-# 实际存进去的是 {filename:...,state:{a:1}} —— 引号全没了，已不是合法 JSON
-```
-
-结果是构建照常成功、但包里是一份**坏掉的配置**，直到装到机器上才发现。
-所以：
-
-* **用 `--value-file` 从文件读**（推荐），文件用编辑器或脚本生成即可
-* `gh_secrets.py` 在写入前会先校验是不是合法 JSON，不合法直接拒绝
-* CI 里还有一道「校验授权预置数据结构」步骤，`state` 内层解析失败会让**构建失败**
-  而不是产出坏包
-
-本机构建同理：自己写一份 `emby/config/license.json` 即可，格式：
-
-```json
-{
-  "filename": "<授权状态文件的文件名>",
-  "state": "<要写入该文件的内容>",
-  "hosts": "<可选，一行，形如 1.2.3.4 example.com>"
-}
-```
-
-`filename` 也放在配置里而不是写死在脚本中 —— 这样仓库里连目标文件名都不出现。
-三个字段都可缺省：缺 `filename` 或 `state` 时不写状态文件，缺 `hosts` 时不做域名拦截。
 
 ### 版本与发布是自动跟随上游的
 
 工作流不写死版本号。`detect` 任务会**交叉验证两个来源**：
 
 1. Emby 官方 stable release（GitHub `/releases/latest` 系列接口，自动排除 beta）
-2. `amilys/embyserver` 在 Docker Hub 上是否有该版本的 `-amd64` / `-arm64` 镜像 tag
+2. 上游运行时在 Docker Hub 上是否有该版本的 `-amd64` / `-arm64` tag
 
 两边都有才采用，否则回退到上一个能对上的版本 —— 因为程序体是「官方 deb 的资源 +
-镜像的运行时」拼起来的，缺任何一半都组装不出来。
+上游运行时的运行时」拼起来的，缺任何一半都组装不出来。
 
 **不需要手动打 tag**：push 到 main、每日定时（03:17 UTC）、手动触发都会走完整流程并发布。
-每次发布产出两个 release：
+发布用版本号作为 tag（如 `4.10.1.0`），同名 tag 已存在时会先删除再重建，
+所以重复运行不会失败、也不会出现「tag 已存在」的报错。
+下载地址固定为：
 
-| tag | 说明 |
-|---|---|
-| `<版本号>`，如 `4.10.1.0` | 固定版本，可长期引用 |
-| `latest` | 始终指向最新稳定版，方便写固定下载链接 |
-
-同名 tag 已存在时会先删除再重建，所以重复运行不会失败、也不会出现「tag 已存在」的报错。
+```
+https://github.com/MinimaxFlora/emby-fnos/releases/download/<版本号>/emby_<版本号>_x86_native.fpk
+https://github.com/MinimaxFlora/emby-fnos/releases/download/<版本号>/emby_<版本号>_arm_native.fpk
+```
 上游一发新版本，第二天的定时任务就会自动产出对应的包。
 
 ## 五、启动行为与排障（踩过的坑）
@@ -465,9 +389,8 @@ build/
 
 
 - 逐层解包镜像，与官方 deb 做**逐文件 sha256 比对**，确认 6 个被改文件与全部增强文件
-- 确认授权预置数据的注入路径可用（有值才注入，无值跳过且构建成功）
 - 组装后的程序体自检：必需文件齐备、增强注入生效、**无容器专用文件残留**
-- 57 项生命周期回归测试，含会员预激活幂等性、PID 复用防护、媒体目录过滤、图标透明度、
+- 57 项生命周期回归测试，含 PID 复用防护、媒体目录过滤、图标透明度、端口对齐、
   启动脚本库路径与参数、**start 必须在 20 秒内返回**、卸载数据保留/清除
 - 两个 FPK 由官方 `fnpack 1.2.3` 成功打包，ELF 架构逐文件核对无串包
 - 4 张图标与官方包逐字节 sha256 一致且带透明背景
@@ -486,10 +409,8 @@ build/
 
 **已知取舍：**
 
-- `run-as: package`（与官方 EmbyServer 包一致）→ 写 `/etc/hosts` 的会员拦截**无权限**，
-  会自动降级为一条警告日志，其余开心版机制（服务端授权状态 + 客户端注册态）照常生效。
-  想让 hosts 拦截也生效：把 `config/privilege` 改成 `"run-as": "root"` 并**删掉**
-  `username`/`groupname`（保留会覆盖 root，见飞牛文档里 1panel 的坑）后重打包
+- `run-as: package`（与官方 EmbyServer 包一致）→ 以独立应用用户运行，不常驻 root。
+  代价是无法写系统级文件，相关操作会记一条日志后跳过
 - **Emby 实际以 root 运行**（不是设计选择，是 `/vol1` 权限布局决定的 —— 见第五节）。
   数据目录归属仍会交还应用用户
 - 随包 `libc` / `loader` / `libstdc++` 已剔除，Emby 依赖系统的 glibc（飞牛 Debian 12
@@ -498,11 +419,12 @@ build/
 
 ---
 
-## 九、来源与免责
+## 九、来源
 
-- 运行时与破解文件：[`amilys/embyserver`](https://hub.docker.com/r/amilys/embyserver)
 - 官方程序与字体/资源：[Emby.Releases](https://github.com/MediaBrowser/Emby.Releases) `emby-server-deb_4.10.1.0`
+- 上游运行时：[amilys/embyserver](https://hub.docker.com/r/amilys/embyserver)
 - 打包格式：[飞牛应用开放平台文档](https://developer.fnnas.com/docs/guide/)、[FNOSP/fnos-developer-skill](https://github.com/FNOSP/fnos-developer-skill)
 - 原生 FPK 结构参考：[conversun/fnos-apps](https://github.com/conversun/fnos-apps)
 
-本项目只做打包封装，不分发 Emby 二进制本身；会员解锁由上游镜像提供，请自行评估合规与授权风险。Emby 本体版权归 Emby LLC。
+本项目只做打包封装，不分发 Emby 二进制本身。Emby 是 Emby LLC 的商标与产品，
+本仓库与 Emby LLC 无隶属关系；上游组件的获取与使用请遵循其自身的许可条款。

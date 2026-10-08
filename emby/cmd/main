@@ -15,6 +15,10 @@ case "$1" in
         prepare_dirs
         # 幂等：升级或异常后可能丢了链接，启动前兜一次，保证动态链接器能找到 soname
         restore_symlinks >/dev/null 2>&1 || log "警告：符号链接恢复不完整"
+        # 转码工具包装也兜一次。实测 service_preinst 阶段 bin/ 常常还没铺好，
+        # 那时生成会静默失败，导致 Emby 调用 ffmpeg 报 Win32Exception(2) / ENOENT、
+        # 转码直接不可用。这里再试一次：幂等、代价极小。
+        install_tool_wrappers || log "警告：转码工具包装未完成，转码可能不可用"
         # 端口对齐必须在 Emby 起来之前做：Emby 没有命令行端口参数，
         # 只认 config/system.xml，飞牛却按 TRIM_SERVICE_PORT 做转发。
         sync_http_port
