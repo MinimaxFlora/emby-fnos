@@ -63,7 +63,8 @@ jobs:
             https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64
           chmod +x _tools/fnpack
           file _tools/fnpack
-          ./_tools/fnpack --version || ./_tools/fnpack version || true
+          # fnpack 没有 --version 子命令，只打印 help 确认可执行
+          ./_tools/fnpack --help 2>&1 | head -5 || true
 
       - name: 准备官方 deb
         run: |

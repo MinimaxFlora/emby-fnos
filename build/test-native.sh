@@ -254,18 +254,25 @@ chmod +x "${TRIM_APPDEST}/bin/emby-server"
 # 某些环境（如 Git Bash）这样调用会因为路径转换而报 "No such file or directory"，
 # 那是测试环境的假象，不是启动脚本的问题。
 mkdir -p "${SANDBOX}/extradri"
+# 记录调用前的 LD_LIBRARY_PATH，用于断言「启动脚本没有改动它」。
+# 不能断言它为空：CI（actions/setup-python）等环境本来就会设置这个变量，
+# 断言为空等于在假设环境干净，而不是在测被测行为（实测踩过：x86 与 arm 都因此假失败）。
+LDLP_BEFORE="${LD_LIBRARY_PATH:-}"
 TRIM_APPDEST="${TRIM_APPDEST}" TRIM_PKGVAR="${TRIM_PKGVAR}" TRIM_SERVICE_PORT=8096 \
     TRIM_APPNAME=emby EMBY_EXTRA_VA_DIRS="${SANDBOX}/extradri" \
     "${TRIM_APPDEST}/bin/emby-server" >/dev/null 2>&1
 
 if [ -f "${capture}" ]; then
     ok "启动脚本成功拉起 EmbyServer 二进制"
-    # 真机实测结论：不能 export LD_LIBRARY_PATH（会污染子进程，实测连 ldd/bash
-    # 都被随包旧 glibc 带崩）。加载器只通过 --library-path 把 system/ 作用于
-    # EmbyServer 自身，所以这里断言它**为空**。
-    grep -q "^LD_LIBRARY_PATH=$" "${capture}" \
-        && ok "未污染 LD_LIBRARY_PATH（改用加载器 --library-path 限定作用域）" \
-        || bad "LD_LIBRARY_PATH 不应被设置：$(grep LD_LIBRARY_PATH "${capture}")"
+    # 真机实测结论：绝不能 export LD_LIBRARY_PATH —— 它会影响所有子进程，
+    # 而随包旧 glibc 一旦进入搜索路径就会把 ldd/bash 都带崩。
+    # 加载器只用 --library-path 把 system/ 作用于 EmbyServer 自身。
+    LDLP_AFTER="$(grep '^LD_LIBRARY_PATH=' "${capture}" | head -1 | cut -d= -f2-)"
+    if [ "${LDLP_AFTER}" = "${LDLP_BEFORE}" ]; then
+        ok "启动脚本未改动 LD_LIBRARY_PATH（原值保持：'${LDLP_BEFORE}'）"
+    else
+        bad "启动脚本改动了 LD_LIBRARY_PATH：'${LDLP_BEFORE}' -> '${LDLP_AFTER}'"
+    fi
 
     # 启动脚本必须用系统加载器 + 只把 system/ 放进库路径
     grep -q -- '--library-path' "${ASSETS}/bin/emby-server" \
