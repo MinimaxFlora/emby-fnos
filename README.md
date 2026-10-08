@@ -204,6 +204,37 @@ echo '199.255.98.60 mb3admin.com' | sudo tee -a /etc/hosts
 
 `199.255.98.60` 是不可路由的保留地址，所以校验请求会直接超时，不会真的连到官方服务器。
 
+### 它到底靠什么生效 —— 不是证书，是一个 JSON 状态文件
+
+很多人以为"开心版"是塞了个证书或改过的二进制。**都不是。** 在未混淆的 .NET 程序集里
+（`tools/analyze_license.py` 可以自己跑一遍）能直接搜到 Emby 授权检查的全部成员名：
+
+```
+MBLicenseFile              get_LicenseFile        _licenseFile
+MBRegistrationRecord       get_registered         set_registered
+get_IsPremiere             get_IsRegistered       get_IsSupporter
+get_isTrial                get_PremiereDate       get_MaxPremiereDate
+UpdateSupporterKey         updatePremiereKey      GetRegistrationStatus
+get_HardwareAccelerationRequiresPremiere        （硬解也走这套判断）
+```
+
+对应到实现就是：
+
+1. **服务端**：`LicenseFile` 属性指向 `<数据目录>/config/` 下那个 32 位十六进制文件名的
+   JSON。Emby 启动时**直接读它**，用 `MBRegistrationRecord` 反序列化，
+   然后 `IsPremiere` / `IsRegistered` / `IsTrial` 全部按里面的字段取值。
+   —— 文件内容就是唯一依据，**没有任何签名校验**。
+2. **客户端**：`embyHappy.js` 往 localStorage 写 `regInfo-<服务器ID>`，让网页端也显示已激活。
+3. **`/etc/hosts` 拦截**：阻止 Emby 拿 `SupporterKey` 去官方服务器核对
+   （核对结果可能把状态文件改回未注册）。
+
+所以这套方案**没有证书、没有密钥对、没有签名**，靠的是：
+**Emby 完全信任一个本地 JSON 文件，而这个文件是可写的。**
+
+那 32 位十六进制文件名也不是 GUID（GUID 带连字符），像是 MD5 或一次性散列 ——
+作用只是**不容易被猜到和互相拷贝**，不参与任何验证。Emby 程序集里也没出现
+那个字面量（搜不到），说明是运行时算出来的，改内容不需要改名字。
+
 ---
 
 ## 五、启动行为与排障（踩过的坑）
