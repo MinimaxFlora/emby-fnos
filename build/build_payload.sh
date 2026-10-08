@@ -132,7 +132,10 @@ for t in "${TARGETS[@]}"; do
 
     # 授权预置数据（可选）：仓库里没有这份文件，CI 从 Secret 生成，
     # 本机需要的话自己写一份。没有就跳过，应用照常可用。
-    mkdir -p "${PKG}/config"
+    #
+    # 注意 app/config/ 不是必然存在 —— 它来自官方 deb，而 amd64 的 deb 有、
+    # arm64 的没有（实测在 CI 的 arm 任务上踩到）。复制前必须先建目录。
+    mkdir -p "${app}/config"
     if [ -f "${PKG}/config/license.json" ]; then
         cp -f "${PKG}/config/license.json" "${app}/config/license.json"
         ok "已注入授权预置数据（config/license.json）"

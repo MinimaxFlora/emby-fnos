@@ -66,15 +66,18 @@ def main() -> int:
             print("  " + text[:200])
             continue
         lines = text.splitlines()
-        # 只打印与测试相关的行，以及失败标记附近
-        keep = []
-        for i, ln in enumerate(lines):
-            s = ln.strip()
-            if ("FAIL" in s or "结果：" in s or "not found" in s.lower()
-                    or "error" in s.lower() and "erroraction" not in s.lower()):
-                keep.append((i, s))
-        for i, s in keep[-40:]:
-            print(f"  {s[:180]}")
+        # 先定位失败步骤，再打印它及其前后的原始日志
+        idx = [i for i, ln in enumerate(lines)
+               if "##[error]" in ln or "[FAIL]" in ln]
+        if not idx:
+            print("\n".join(lines[-40:]))
+            continue
+        lo = max(0, idx[0] - 45)
+        hi = min(len(lines), idx[-1] + 3)
+        for ln in lines[lo:hi]:
+            # 去掉 GitHub 的时间戳前缀
+            s = ln.split(" ", 1)[1] if len(ln) > 30 and ln[4] == "-" else ln
+            print("  " + s.rstrip()[:180])
     return 0
 
 
