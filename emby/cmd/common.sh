@@ -20,17 +20,22 @@ EMBY_STATE_DIR="${EMBY_DATA}/state"
 
 # 授权预置数据（不随仓库分发）
 #
-# 说明：本包可以在安装时把一份「授权状态」写入应用数据目录，具体内容**不在
-# 仓库里**，而是构建时由 CI 从仓库 Secret 注入，落成一个配置文件随包分发：
+# 本包可以在安装时把一份「授权状态」写入应用数据目录，具体内容**不在仓库里**，
+# 而是构建时由 CI 从仓库 Secret 注入，落成一个配置文件随包分发：
 #
-#     <包根>/config/license.json    {"state": "<授权状态文件的 JSON 内容>",
-#                                    "hosts": "<可选的域名拦截条目>"}
+#     <包根>/config/license.json
+#     {
+#       "filename": "<授权状态文件的文件名>",     # 可选
+#       "state":    "<该文件的内容>",
+#       "hosts":    "<可选的域名拦截条目>"        # 可选
+#     }
 #
-# 文件不存在时全部跳过 —— 这样没有 Secret 的构建（例如别人 fork 后自己编）
-# 依然能正常装、正常跑，只是不带预置授权。
+# 文件不存在（或缺少 state）时整体跳过 —— 这样没有 Secret 的构建（例如别人
+# fork 后自己编）依然能正常装、正常跑，只是不带预置授权状态。
 EMBY_LICENSE_DIR="${EMBY_DATA}/config"
-EMBY_LICENSE_FILE="${EMBY_LICENSE_DIR}/57556c0b1664038946abc87649b9efd8"
 EMBY_LICENSE_DATA="${EMBY_HOME}/config/license.json"
+# 由 apply_license() 从 EMBY_LICENSE_DATA 里解析出来后填充
+EMBY_LICENSE_FILE=""
 
 log() {
     local line="[emby] $*"
@@ -277,11 +282,12 @@ restore_owner() {
 # ---------------------------------------------------------------------------
 # 授权预置（数据来自随包的 config/license.json，见文件头说明）
 #
-#   state : 写入应用数据目录的授权状态文件内容
-#   hosts : 可选的域名拦截条目（一行，形如 "IP 域名"）
+#   filename : 授权状态文件的文件名（可选，来自配置而不是写死在脚本里）
+#   state    : 写入该文件的内容
+#   hosts    : 可选的域名拦截条目（一行，形如 "IP 域名"）
 #
-# 两个都做幂等处理；配置文件不存在则整体跳过，不影响安装与启动。
-# 需要 python3 解析 JSON，系统没有时只记一条警告。
+# 全部幂等；配置文件不存在或缺 state 则整体跳过，不影响安装与启动。
+# 需要 python3 解析 JSON，系统没有可用 python 时只记一条警告。
 # ---------------------------------------------------------------------------
 apply_license() {
     prepare_dirs
@@ -306,32 +312,35 @@ apply_license() {
         return 0
     fi
 
-    local state hosts
-    state="$("${py}" -c "
+    # 一次解析出三个字段，避免重复启动解释器
+    local parsed fname state hosts
+    parsed="$("${py}" -c "
 import json,sys
 try:
     d = json.load(open(sys.argv[1], encoding='utf-8'))
 except Exception:
     sys.exit(0)
-print(d.get('state',''))
+for k in ('filename','state','hosts'):
+    v = d.get(k,'') or ''
+    print(str(v).replace(chr(10),' '))
 " "${EMBY_LICENSE_DATA}" 2>/dev/null)"
-    hosts="$("${py}" -c "
-import json,sys
-try:
-    d = json.load(open(sys.argv[1], encoding='utf-8'))
-except Exception:
-    sys.exit(0)
-print(d.get('hosts',''))
-" "${EMBY_LICENSE_DATA}" 2>/dev/null)"
+    fname="$(printf '%s\n' "${parsed}" | sed -n '1p')"
+    state="$(printf '%s\n' "${parsed}" | sed -n '2p')"
+    hosts="$(printf '%s\n' "${parsed}" | sed -n '3p')"
 
     # 1. 授权状态文件：仅在不存在时写入，避免升级时覆盖 Emby 自己维护的内容
     if [ -n "${state}" ]; then
-        if [ ! -f "${EMBY_LICENSE_FILE}" ]; then
-            printf '%s\n' "${state}" > "${EMBY_LICENSE_FILE}" 2>/dev/null \
-                && log "已写入授权状态文件" \
-                || log "警告：写入授权状态文件失败（${EMBY_LICENSE_FILE}）"
+        if [ -z "${fname}" ]; then
+            log "警告：授权预置数据缺少 filename 字段，无法定位状态文件"
         else
-            log "授权状态文件已存在，保持不变"
+            EMBY_LICENSE_FILE="${EMBY_LICENSE_DIR}/${fname}"
+            if [ ! -f "${EMBY_LICENSE_FILE}" ]; then
+                printf '%s\n' "${state}" > "${EMBY_LICENSE_FILE}" 2>/dev/null \
+                    && log "已写入授权状态文件" \
+                    || log "警告：写入授权状态文件失败（${EMBY_LICENSE_FILE}）"
+            else
+                log "授权状态文件已存在，保持不变"
+            fi
         fi
     fi
 

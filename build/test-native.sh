@@ -132,16 +132,17 @@ apply_license >/dev/null 2>&1; rc=$?
 [ -f "${SANDBOX}/license.bak" ] && mv -f "${SANDBOX}/license.bak" "${EMBY_LICENSE_DATA}"
 if [ -f "${EMBY_LICENSE_DATA}" ]; then
     # 用一份自己造的假数据，确认写进去的就是文件里的内容
-    printf '%s' '{"state":"{\"registered\":true,\"marker\":\"from-config\",\"isValid\":true}","hosts":""}' \
+    printf '%s' '{"filename":"0000000000000000000000000000test","state":"{\"registered\":true,\"marker\":\"from-config\",\"isValid\":true}","hosts":""}' \
         > "${SANDBOX}/license.json"
     cp -f "${SANDBOX}/license.json" "${EMBY_LICENSE_DATA}"
     apply_license >/dev/null 2>&1
-    if [ -f "${EMBY_LICENSE_FILE}" ]; then
-        grep -q 'from-config' "${EMBY_LICENSE_FILE}" \
-            && ok "授权状态内容确实来自 config/license.json（不是脚本常量）" \
-            || bad "授权状态内容与配置文件不符：$(cat "${EMBY_LICENSE_FILE}")"
+    target="${EMBY_DATA}/config/0000000000000000000000000000test"
+    if [ -f "${target}" ]; then
+        grep -q 'from-config' "${target}" \
+            && ok "授权状态内容确实来自 config/license.json（含文件名，均非脚本常量）" \
+            || bad "授权状态内容与配置文件不符：$(cat "${target}")"
     elif command -v python3 >/dev/null 2>&1 && python3 -c 'pass' >/dev/null 2>&1; then
-        bad "有授权预置数据但未写入 ${EMBY_LICENSE_FILE}"
+        bad "有授权预置数据但未写入 ${target}"
     else
         # 测试环境没有可用的 python（例如 Git Bash 里的 Store 占位别名），
         # 无法解析 JSON —— 这是环境限制而非缺陷
@@ -149,11 +150,13 @@ if [ -f "${EMBY_LICENSE_DATA}" ]; then
     fi
 
     # 幂等：第二次调用不得覆盖（避免升级时冲掉 Emby 自维护内容）
-    printf '%s' '{"marker":"keep-me"}' > "${EMBY_LICENSE_FILE}"
-    apply_license >/dev/null 2>&1
-    grep -q 'keep-me' "${EMBY_LICENSE_FILE}" \
-        && ok "重复调用不覆盖已有授权状态文件（幂等）" \
-        || bad "重复调用把已有授权状态文件覆盖了"
+    [ -f "${target}" ] && {
+        printf '%s' '{"marker":"keep-me"}' > "${target}"
+        apply_license >/dev/null 2>&1
+        grep -q 'keep-me' "${target}" \
+            && ok "重复调用不覆盖已有授权状态文件（幂等）" \
+            || bad "重复调用把已有授权状态文件覆盖了"
+    }
 else
     skip "包内没有 config/license.json（未配置 Secret 的构建），跳过内容校验"
 fi
