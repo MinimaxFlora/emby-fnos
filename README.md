@@ -13,6 +13,30 @@
 
 > ⚠️ 装错架构会因 ELF 格式不符直接起不来，请按 NAS 架构选包。
 
+### 不需要本机环境？用 GitHub Actions 构建
+
+仓库已配好工作流（`.github/workflows/build.yml`），**在 Linux runner 上构建两个架构**，
+不需要 Windows、不需要 WSL、不需要 Docker：
+
+```bash
+git push                    # push 到 main 自动构建
+gh workflow run "Build fnOS packages"     # 或手动触发
+```
+
+产物在 Actions 运行的 **Artifacts** 里（`fpk-x86` / `fpk-arm`，保留 30 天）。
+打 `v*` 标签会自动发布到 Release。
+
+配合 `tools/gh_artifacts.py` 可以直接把 CI 产物取回 `dist/`：
+
+```bash
+export GH_TOKEN=<你的 token>
+python tools/gh_artifacts.py                    # 列出产物
+python tools/gh_artifacts.py --get fpk-x86      # 下载到 dist/
+```
+
+CI 跑的是与本机完全相同的构建脚本（`build/build_payload.sh`）。
+实测两条链路的产物只差 42 KB（480 MB 量级），可视为一致。
+
 ---
 
 ## 一、安装

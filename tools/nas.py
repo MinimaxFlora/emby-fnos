@@ -105,7 +105,9 @@ INSTALL_HINT = """
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    # 注意：dest 不能叫 cmd —— 子命令里也有个 --cmd，两者会互相覆盖，
+    # 结果 args.cmd 变成命令内容，永远匹配不上 "run"（踩过，表现为"连上了但没输出"）。
+    sub = ap.add_subparsers(dest="action", required=True)
 
     p_run = sub.add_parser("run", help="在 NAS 上执行命令/脚本")
     p_run.add_argument("--cmd", default="")
@@ -124,16 +126,18 @@ def main() -> int:
     cli = connect()
     try:
         print(f"已连接 {USER}@{HOST}")
-        if args.cmd == "run":
+        if args.action == "run":
             if args.script:
                 with open(args.script, encoding="utf-8") as f:
                     code = f.read()
             else:
                 code = args.cmd
+            if not code.strip():
+                raise SystemExit("请用 --cmd 或 --script 指定要执行的内容")
             return run(cli, code, args.timeout)
-        if args.cmd == "put":
+        if args.action == "put":
             return put(cli, args.local, args.remote)
-        if args.cmd == "deploy":
+        if args.action == "deploy":
             put(cli, args.fpk, args.remote)
             print(INSTALL_HINT.format(remote=args.remote))
             return 0
