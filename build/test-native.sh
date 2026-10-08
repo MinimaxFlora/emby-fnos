@@ -68,6 +68,13 @@ setup_env() {
     mkdir -p "${TRIM_APPDEST}/bin" "${TRIM_APPDEST}/system/dashboard-ui" "${TRIM_APPDEST}/lib"
     : > "${TRIM_TEMP_LOGFILE}"
 
+    # 授权预置数据：如果包目录里有就复制到沙盒，让 apply_license 能读到。
+    # 没有也正常（未配置 Secret 的构建），第 2 组会走「跳过」分支。
+    if [ -f "${PKG}/config/license.json" ]; then
+        mkdir -p "${TRIM_APPDEST}/config"
+        cp -f "${PKG}/config/license.json" "${TRIM_APPDEST}/config/license.json"
+    fi
+
     # 假的可执行文件与增强标记
     cat > "${TRIM_APPDEST}/bin/emby-server" <<'LAUNCH'
 #!/bin/bash
@@ -106,40 +113,58 @@ done
 teardown_env
 
 # ---------------------------------------------------------------------------
-head_ "2. 会员预激活"
+head_ "2. 授权预置（数据来自随包 config/license.json）"
 setup_env
 prepare_dirs
-FAKE_HOSTS="${SANDBOX}/hosts"
-: > "${FAKE_HOSTS}"
-# 让 apply_license 写我们的假 hosts：临时覆盖路径不可行（脚本写死 /etc/hosts），
-# 因此这里只验证授权状态文件部分，hosts 部分改测逻辑分支。
-apply_license >/dev/null 2>&1
-if [ -f "${EMBY_LICENSE_FILE}" ]; then
-    content="$(cat "${EMBY_LICENSE_FILE}")"
-    printf '%s' "${content}" | grep -q '"registered":true' \
-        && ok "授权状态文件已写入且 registered=true" \
-        || bad "授权状态文件内容异常：${content}"
-    printf '%s' "${content}" | grep -q '"isValid":true' \
-        && ok "授权状态 isValid=true" || bad "授权状态 isValid 不为 true"
-    printf '%s' "${content}" | grep -q '2030-01-01' \
-        && ok "授权到期时间为 2030-01-01" || bad "授权到期时间异常"
+
+# 2a. 没有 license.json 时必须整体跳过，且不报错
+if [ -f "${EMBY_LICENSE_DATA}" ]; then
+    mv -f "${EMBY_LICENSE_DATA}" "${SANDBOX}/license.bak"
+fi
+apply_license >/dev/null 2>&1; rc=$?
+[ "${rc}" -eq 0 ] && ok "无授权预置数据时 apply_license 返回 0（不影响安装）" \
+    || bad "无授权预置数据时 apply_license 返回 ${rc}"
+[ ! -f "${EMBY_LICENSE_FILE}" ] \
+    && ok "无授权预置数据时不写入授权状态文件" \
+    || bad "无授权预置数据却写入了授权状态文件"
+
+# 2b. 有 license.json 时应写入，且内容来自文件而不是脚本里的常量
+[ -f "${SANDBOX}/license.bak" ] && mv -f "${SANDBOX}/license.bak" "${EMBY_LICENSE_DATA}"
+if [ -f "${EMBY_LICENSE_DATA}" ]; then
+    # 用一份自己造的假数据，确认写进去的就是文件里的内容
+    printf '%s' '{"state":"{\"registered\":true,\"marker\":\"from-config\",\"isValid\":true}","hosts":""}' \
+        > "${SANDBOX}/license.json"
+    cp -f "${SANDBOX}/license.json" "${EMBY_LICENSE_DATA}"
+    apply_license >/dev/null 2>&1
+    if [ -f "${EMBY_LICENSE_FILE}" ]; then
+        grep -q 'from-config' "${EMBY_LICENSE_FILE}" \
+            && ok "授权状态内容确实来自 config/license.json（不是脚本常量）" \
+            || bad "授权状态内容与配置文件不符：$(cat "${EMBY_LICENSE_FILE}")"
+    elif command -v python3 >/dev/null 2>&1 && python3 -c 'pass' >/dev/null 2>&1; then
+        bad "有授权预置数据但未写入 ${EMBY_LICENSE_FILE}"
+    else
+        # 测试环境没有可用的 python（例如 Git Bash 里的 Store 占位别名），
+        # 无法解析 JSON —— 这是环境限制而非缺陷
+        skip "测试环境无可用 python，跳过授权内容校验"
+    fi
+
+    # 幂等：第二次调用不得覆盖（避免升级时冲掉 Emby 自维护内容）
+    printf '%s' '{"marker":"keep-me"}' > "${EMBY_LICENSE_FILE}"
+    apply_license >/dev/null 2>&1
+    grep -q 'keep-me' "${EMBY_LICENSE_FILE}" \
+        && ok "重复调用不覆盖已有授权状态文件（幂等）" \
+        || bad "重复调用把已有授权状态文件覆盖了"
 else
-    bad "未生成授权状态文件 ${EMBY_LICENSE_FILE}"
+    skip "包内没有 config/license.json（未配置 Secret 的构建），跳过内容校验"
 fi
 
-# 幂等：第二次调用不得覆盖（避免升级时冲掉 Emby 自维护内容）
-printf '%s' '{"marker":"keep-me"}' > "${EMBY_LICENSE_FILE}"
-apply_license >/dev/null 2>&1
-grep -q 'keep-me' "${EMBY_LICENSE_FILE}" \
-    && ok "重复调用不覆盖已有授权文件（幂等）" \
-    || bad "重复调用把已有授权文件覆盖了"
-
-# hosts 拦截分支：/etc/hosts 不可写时应给出警告而不是失败
+# 2c. hosts 分支：不可写时必须安全降级
 if [ -w /etc/hosts ]; then
     skip "当前环境 /etc/hosts 可写，改造假验证（真机由飞牛 root 执行）"
 else
-    apply_license >/dev/null 2>&1
-    ok "无 /etc/hosts 写权限时安全降级（不报错）"
+    apply_license >/dev/null 2>&1; rc=$?
+    [ "${rc}" -eq 0 ] && ok "无 /etc/hosts 写权限时安全降级（不报错）" \
+        || bad "/etc/hosts 不可写时 apply_license 返回 ${rc}"
 fi
 teardown_env
 

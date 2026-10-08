@@ -11,6 +11,11 @@ _work/
 emby/app/
 emby/provenance*.json
 
+# 授权预置数据 —— 绝不进仓库。
+# CI 从仓库 Secret（EMBY_LICENSE_JSON / EMBY_LICENSE_HOSTS）在构建时生成，
+# 见 .github/workflows/build.yml 的「注入授权预置数据」步骤。
+emby/config/license.json
+
 # 构建工具（体积大，自行从官方下载；CI 会自动拉取）
 _tools/
 

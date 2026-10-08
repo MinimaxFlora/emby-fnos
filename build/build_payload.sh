@@ -130,6 +130,17 @@ for t in "${TARGETS[@]}"; do
     chmod +x "${app}/bin/emby-server" 2>/dev/null || true
     ok "已叠加启动脚本与桌面入口"
 
+    # 授权预置数据（可选）：仓库里没有这份文件，CI 从 Secret 生成，
+    # 本机需要的话自己写一份。没有就跳过，应用照常可用。
+    mkdir -p "${PKG}/config"
+    if [ -f "${PKG}/config/license.json" ]; then
+        cp -f "${PKG}/config/license.json" "${app}/config/license.json"
+        ok "已注入授权预置数据（config/license.json）"
+    else
+        rm -f "${app}/config/license.json"
+        msg "未提供授权预置数据（config/license.json 不存在），跳过注入"
+    fi
+
     # --- 5. 库目录拆分（真机实测结论）-----------------------------------
     # system/ 给 EmbyServer（.NET 运行时 + Emby 原生依赖）
     # lib/    只留 ffmpeg 的库；随包 libc/loader 必须剔除，否则段错误

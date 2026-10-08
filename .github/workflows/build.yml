@@ -6,27 +6,122 @@ name: Build fnOS packages
 #   本机（Windows）构建必须绕一大圈 —— Windows 建不了符号链接、WSL 建的链接
 #   Windows 工具又读不了，所以负载里的 soname 别名被解引用成实体文件，
 #   再由安装脚本在 NAS 上重建。Linux runner 上这一切都不存在，
-#   但本项目已经收敛到「负载只放实体文件 + 库目录按实测拆分」的方案
-#   （见 build/split_libs.py），所以 Linux 构建与本机产出一致，
-#   而且不需要 WSL 这一层。
+#   而且本项目已收敛到「负载只放实体文件 + 库目录按实测拆分」的方案
+#   （见 build/split_libs.py），所以 CI 与本机产出一致，也不需要 WSL 这一层。
+#
+# 版本如何决定：
+#   不写死版本号，而是**查询上游**并交叉验证两个来源 ——
+#     1. Emby 官方 stable release（GitHub /releases/latest，自动排除 beta）
+#     2. amilys/embyserver 在 Docker Hub 上是否有对应版本的镜像 tag
+#   两者都有该版本才使用；否则回退到上一个能对上的版本。
+#   这样上游一更新，定时任务就会自动构建并发布新版本。
 
 on:
   push:
     branches: [main]
     tags: ['v*']
   pull_request:
+  schedule:
+    # 每天 03:17 (UTC) 自动检查上游是否有新版本
+    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
       emby_version:
-        description: Emby 版本
-        default: 4.10.1.0
-        required: true
+        description: 手动指定 Emby 版本（留空 = 自动查询上游）
+        default: ''
+        required: false
 
 permissions:
   contents: write
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 决定要构建的版本
+  # ---------------------------------------------------------------------------
+  detect:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      is_release: ${{ steps.pick.outputs.is_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 查询上游版本
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ github.event.inputs.emby_version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+
+          UA = {"User-Agent": "emby-fnos-builder"}
+
+          def get(url):
+              req = urllib.request.Request(url, headers=UA)
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  return json.load(r)
+
+          def stable_versions():
+              """Emby 官方 stable release 的版本列表（API 已排除预发布）。"""
+              out = []
+              rel = get("https://api.github.com/repos/MediaBrowser/Emby.Releases/releases?per_page=30")
+              for r in rel:
+                  tag = (r.get("tag_name") or "").strip()
+                  name = (r.get("name") or "")
+                  # 明确跳过 beta / 预发布
+                  if r.get("prerelease") or "beta" in name.lower():
+                      continue
+                  if re.fullmatch(r"\d+(\.\d+)+", tag):
+                      out.append(tag)
+              return out
+
+          def image_tags():
+              """amilys/embyserver 上的镜像 tag（我们取运行时的那一半）。"""
+              tags = set()
+              url = ("https://hub.docker.com/v2/repositories/amilys/embyserver/tags"
+                     "?page_size=100&ordering=last_updated")
+              for t in get(url).get("results", []):
+                  tags.add(t.get("name", ""))
+              return tags
+
+          manual = (os.environ.get("INPUT_VERSION") or "").strip()
+          if manual:
+              version = manual
+              print(f"::notice::使用手动指定版本 {version}")
+          else:
+              versions = stable_versions()
+              tags = image_tags()
+              print(f"官方 stable 版本（新→旧）: {versions[:6]}")
+              version = ""
+              for v in versions:
+                  # 必须两个来源都有：deb 来自官方，system/ 来自 amilys 镜像
+                  if f"{v}-amd64" in tags and f"{v}-arm64" in tags:
+                      version = v
+                      print(f"选定 {v}（官方 stable 且镜像双架构齐备）")
+                      break
+              if not version:
+                  raise SystemExit("找不到两边都齐备的稳定版本")
+
+          # 只有 push / 定时 / 手动才发版；PR 只构建不发版
+          is_release = os.environ.get("GITHUB_EVENT_NAME") != "pull_request"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"version={version}\n")
+              f.write(f"is_release={'true' if is_release else 'false'}\n")
+          print(f"version={version} is_release={is_release}")
+          PY
+        shell: bash
+
+  # ---------------------------------------------------------------------------
+  # 2. 构建两个架构
+  # ---------------------------------------------------------------------------
   build:
+    needs: detect
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -35,11 +130,9 @@ jobs:
           - arch: x86
             emby_arch: amd64
             platform: x86
-            deb_arch: amd64
           - arch: arm
             emby_arch: arm64
             platform: arm
-            deb_arch: arm64
 
     name: ${{ matrix.arch }} (${{ matrix.emby_arch }})
 
@@ -66,52 +159,66 @@ jobs:
           # fnpack 没有 --version 子命令，只打印 help 确认可执行
           ./_tools/fnpack --help 2>&1 | head -5 || true
 
+      # -----------------------------------------------------------------------
+      # 授权预置数据：值来自仓库 Secret / Variable，仓库里没有明文。
+      # 未配置时生成空配置，后续步骤会跳过注入，构建照常成功。
+      # -----------------------------------------------------------------------
+      - name: 注入授权预置数据（来自 Secrets / Variables）
+        env:
+          LICENSE_STATE: ${{ secrets.EMBY_LICENSE_JSON }}
+          LICENSE_HOSTS: ${{ vars.EMBY_LICENSE_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p emby/config
+          # 用 python 组 JSON，避免 shell 引号把内容弄坏
+          python3 - <<'PY'
+          import json, os
+          state = (os.environ.get("LICENSE_STATE") or "").strip()
+          hosts = (os.environ.get("LICENSE_HOSTS") or "").strip()
+          if not state:
+              print("::warning::未配置 EMBY_LICENSE_JSON，将构建不带授权预置数据的包")
+              raise SystemExit(0)
+          cfg = {"state": state}
+          if hosts:
+              cfg["hosts"] = hosts
+          with open("emby/config/license.json", "w", encoding="utf-8") as f:
+              json.dump(cfg, f, ensure_ascii=False)
+          print(f"已生成 emby/config/license.json（state {len(state)} 字符，"
+                f"hosts {'有' if hosts else '无'}）")
+          PY
+
       - name: 准备官方 deb
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p _work
-          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
-          URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${VERSION}/emby-server-deb_${VERSION}_${{ matrix.deb_arch }}.deb"
+          URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${VERSION}/emby-server-deb_${VERSION}_${{ matrix.emby_arch }}.deb"
           echo "下载 $URL"
           curl -fsSL --retry 3 -o "_work/emby-${{ matrix.emby_arch }}.deb" "$URL"
           python build/extract_deb.py \
             --deb "_work/emby-${{ matrix.emby_arch }}.deb" \
             --out "_work/deb-${{ matrix.emby_arch }}"
 
-      - name: 导出官方镜像树
-        run: |
-          set -euo pipefail
-          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
-          python build/export_image_tree.py \
-            --arch ${{ matrix.emby_arch }} \
-            --tag "${VERSION}-${{ matrix.emby_arch }}" \
-            --out "_work/image-${{ matrix.emby_arch }}"
-
       - name: 组装负载（含库目录拆分）
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
-          python build/build_native.py \
-            --arch ${{ matrix.emby_arch }} \
-            --image-root "_work/image-${{ matrix.emby_arch }}" \
-            --deb-root "_work/deb-${{ matrix.emby_arch }}/opt/emby-server" \
-            --out "emby/app" \
-            --version "$VERSION" \
-            --bundle
-          python build/split_libs.py --app-dir emby/app
+          bash build/build_payload.sh ${{ matrix.arch }} --version "${VERSION}"
 
-      - name: 叠加自有文件并渲染 manifest
+      - name: 渲染 manifest
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
-          cp -a app-assets/bin app-assets/ui emby/app/
-          chmod +x emby/app/bin/emby-server
           # manifest 每次从模板渲染：就地改写会把占位符吃掉，第二次构建就失败
           sed -e "s/@PLATFORM@/${{ matrix.platform }}/" \
               -e "s/@APPVERSION@/${VERSION}/" \
               emby/manifest.template > emby/manifest
-          grep -q '@' emby/manifest && { echo "manifest 仍有未替换占位符"; exit 1; } || true
-          echo "--- manifest ---"
+          if grep -q '@[A-Z]*@' emby/manifest; then
+            echo "manifest 仍有未替换占位符"; exit 1
+          fi
           cat emby/manifest
 
       - name: 自检（负载里不能有随包 libc/loader）
@@ -137,9 +244,10 @@ jobs:
         run: python build/fetch_official_icons.py --check
 
       - name: 打包
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ github.event.inputs.emby_version || '4.10.1.0' }}"
           mkdir -p dist _work/fpk-out
           # fnpack 把 fpk 写到当前工作目录，所以先切进去
           cd _work/fpk-out
@@ -149,6 +257,21 @@ jobs:
           OUT="$GITHUB_WORKSPACE/dist/emby_${VERSION}_${{ matrix.arch }}_native.fpk"
           mv "$FPK" "$OUT"
           ls -lh "$OUT"
+
+      - name: 确认包里没有明文授权数据泄漏到顶层
+        run: |
+          set -euo pipefail
+          # 授权数据只应在 app/config/license.json（安装时才被读取），
+          # 不应出现在 cmd/ 或 manifest 里
+          if grep -rl 'isTrial' emby/cmd emby/manifest 2>/dev/null; then
+            echo "FAIL 授权数据出现在脚本里，应只放在 config/license.json"
+            exit 1
+          fi
+          if [ -f emby/config/license.json ]; then
+            echo "授权预置数据已随包（emby/config/license.json）"
+          else
+            echo "本包不含授权预置数据"
+          fi
 
       - name: 回归测试
         run: bash build/test-native.sh
@@ -160,16 +283,77 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # ---------------------------------------------------------------------------
+  # 3. 发布
+  #
+  #  不需要手动打 tag：push / 定时 / 手动触发都会走到这里，
+  #  用「上游版本号」作为 tag；同名 tag 已存在就先删掉再重建，
+  #  这样上游一更新就自动产出对应版本，并且 latest 永远指向最新稳定版。
+  # ---------------------------------------------------------------------------
   release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [detect, build]
+    if: needs.detect.outputs.is_release == 'true'
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: 汇总并发布
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*.fpk
-          generate_release_notes: true
+
+      - name: 汇总产物
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -name '*.fpk' -exec cp -v {} release/ \;
+          ls -lh release/
+          count=$(find release -name '*.fpk' | wc -l)
+          [ "$count" -eq 2 ] || { echo "预期 2 个 fpk，实际 $count"; exit 1; }
+
+      - name: 发布（幂等：同名 tag/release 先删除再重建）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="${VERSION}"
+
+          # 已存在同名 release 就删掉（连带 tag），保证可重复发布
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "已存在 release ${TAG}，先删除"
+            gh release delete "${TAG}" --yes --cleanup-tag
+          fi
+          # tag 可能残留（例如 release 被单独删过）
+          git push origin ":refs/tags/${TAG}" 2>/dev/null || true
+
+          gh release create "${TAG}" \
+            --title "Emby ${VERSION} for 飞牛 fnOS" \
+            --notes "$(cat <<EOF
+          基于 amilys/embyserver ${VERSION} 运行时构建的原生安装包（非 Docker）。
+
+          | 包 | 架构 |
+          |---|---|
+          | \`emby_${VERSION}_x86_native.fpk\` | x86_64 |
+          | \`emby_${VERSION}_arm_native.fpk\` | ARM64 |
+
+          安装：应用中心 → 手动安装 → 选择对应架构的 \`.fpk\`。
+
+          构建来源见仓库 README；版本号由工作流自动查询上游 stable release 得出。
+          EOF
+          )" \
+            release/*.fpk
+
+          # latest 指针：始终指向最新稳定版
+          if gh release view latest >/dev/null 2>&1; then
+            gh release delete latest --yes --cleanup-tag || true
+          fi
+          gh release create latest \
+            --title "Emby for 飞牛 fnOS（最新稳定版）" \
+            --notes "当前为 **Emby ${VERSION}**。固定版本的说明见 \`${TAG}\`。" \
+            release/*.fpk
+
+          echo "已发布 ${TAG} 与 latest"

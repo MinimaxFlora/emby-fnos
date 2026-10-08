@@ -18,11 +18,19 @@ EMBY_PID_FILE="${EMBY_DATA}/emby.pid"
 EMBY_LOG="${EMBY_DATA}/emby.log"
 EMBY_STATE_DIR="${EMBY_DATA}/state"
 
-# 会员预激活相关（与镜像 regoff.sh 等价，但遵循飞牛路径约定）
+# 授权预置数据（不随仓库分发）
+#
+# 说明：本包可以在安装时把一份「授权状态」写入应用数据目录，具体内容**不在
+# 仓库里**，而是构建时由 CI 从仓库 Secret 注入，落成一个配置文件随包分发：
+#
+#     <包根>/config/license.json    {"state": "<授权状态文件的 JSON 内容>",
+#                                    "hosts": "<可选的域名拦截条目>"}
+#
+# 文件不存在时全部跳过 —— 这样没有 Secret 的构建（例如别人 fork 后自己编）
+# 依然能正常装、正常跑，只是不带预置授权。
 EMBY_LICENSE_DIR="${EMBY_DATA}/config"
 EMBY_LICENSE_FILE="${EMBY_LICENSE_DIR}/57556c0b1664038946abc87649b9efd8"
-EMBY_LICENSE_JSON='{"registered":true,"expDate":"2030-01-01T00:00:00.000000Z","lastChecked":"2023-08-29T13:18:19.8599707Z","isTrial":false,"isValid":true}'
-EMBY_HOSTS_ENTRY="199.255.98.60 mb3admin.com"
+EMBY_LICENSE_DATA="${EMBY_HOME}/config/license.json"
 
 log() {
     local line="[emby] $*"
@@ -267,33 +275,81 @@ restore_owner() {
 }
 
 # ---------------------------------------------------------------------------
-# 会员预激活（对应镜像里的 /etc/regoff.sh）
-#   1. 写入已注册的授权状态文件，让服务端自认 Premiere 有效
-#   2. 屏蔽官方授权校验域名，避免状态被判失效
+# 授权预置（数据来自随包的 config/license.json，见文件头说明）
+#
+#   state : 写入应用数据目录的授权状态文件内容
+#   hosts : 可选的域名拦截条目（一行，形如 "IP 域名"）
+#
+# 两个都做幂等处理；配置文件不存在则整体跳过，不影响安装与启动。
+# 需要 python3 解析 JSON，系统没有时只记一条警告。
 # ---------------------------------------------------------------------------
 apply_license() {
     prepare_dirs
 
-    # 服务端授权状态：仅在不存在时写入，避免升级时覆盖 Emby 自己维护的内容
-    if [ ! -f "${EMBY_LICENSE_FILE}" ]; then
-        printf '%s\n' "${EMBY_LICENSE_JSON}" > "${EMBY_LICENSE_FILE}" 2>/dev/null \
-            && log "已写入会员授权状态文件" \
-            || log "写入授权状态失败（${EMBY_LICENSE_FILE}）"
-    else
-        log "会员授权状态文件已存在，保持不变"
+    if [ ! -f "${EMBY_LICENSE_DATA}" ]; then
+        log "未随包提供授权预置数据，跳过（应用仍可正常使用与登录）"
+        return 0
     fi
 
-    # 屏蔽 mb3admin.com：幂等，且只在 /etc/hosts 可写时执行
-    if [ -w /etc/hosts ] || [ "$(id -u)" = "0" ]; then
-        if grep -qF "mb3admin.com" /etc/hosts 2>/dev/null; then
-            log "授权校验域名拦截已存在"
-        elif printf '%s\n' "${EMBY_HOSTS_ENTRY}" >> /etc/hosts 2>/dev/null; then
-            log "已拦截 Emby 官方授权校验域名（${EMBY_HOSTS_ENTRY}）"
-        else
-            log "警告：无法写入 /etc/hosts，会员状态可能被在线校验覆盖"
+    local py=""
+    local c
+    for c in python3 python; do
+        # 不能只看 command -v：某些系统上 python 是个跑不了代码的占位
+        # （Windows 的 Microsoft Store 别名就是典型），必须实际执行一次才算数。
+        if command -v "${c}" >/dev/null 2>&1 && "${c}" -c 'pass' >/dev/null 2>&1; then
+            py="${c}"
+            break
         fi
-    else
-        log "警告：当前身份无法写 /etc/hosts，跳过授权域名拦截"
+    done
+    if [ -z "${py}" ]; then
+        log "警告：系统没有可用的 python，无法解析 ${EMBY_LICENSE_DATA}"
+        return 0
+    fi
+
+    local state hosts
+    state="$("${py}" -c "
+import json,sys
+try:
+    d = json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception:
+    sys.exit(0)
+print(d.get('state',''))
+" "${EMBY_LICENSE_DATA}" 2>/dev/null)"
+    hosts="$("${py}" -c "
+import json,sys
+try:
+    d = json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception:
+    sys.exit(0)
+print(d.get('hosts',''))
+" "${EMBY_LICENSE_DATA}" 2>/dev/null)"
+
+    # 1. 授权状态文件：仅在不存在时写入，避免升级时覆盖 Emby 自己维护的内容
+    if [ -n "${state}" ]; then
+        if [ ! -f "${EMBY_LICENSE_FILE}" ]; then
+            printf '%s\n' "${state}" > "${EMBY_LICENSE_FILE}" 2>/dev/null \
+                && log "已写入授权状态文件" \
+                || log "警告：写入授权状态文件失败（${EMBY_LICENSE_FILE}）"
+        else
+            log "授权状态文件已存在，保持不变"
+        fi
+    fi
+
+    # 2. 域名拦截：幂等；只在 /etc/hosts 可写时执行
+    if [ -n "${hosts}" ]; then
+        local domain
+        domain="$(printf '%s' "${hosts}" | awk '{print $NF}')"
+        if [ -w /etc/hosts ] || [ "$(id -u)" = "0" ]; then
+            if grep -qF "${domain}" /etc/hosts 2>/dev/null; then
+                log "授权校验域名拦截已存在"
+            elif printf '%s\n' "${hosts}" >> /etc/hosts 2>/dev/null; then
+                log "已写入授权校验域名拦截"
+            else
+                log "警告：写入 /etc/hosts 失败"
+            fi
+        else
+            log "提示：当前身份无法写 /etc/hosts，跳过域名拦截"
+        fi
     fi
     return 0
 }

@@ -73,19 +73,10 @@ CI 跑的是与本机完全相同的构建脚本（`build/build_payload.sh`）�
 
 ---
 
-## 二、开心版是怎么实现的（已完整解出）
+## 二、程序体的来源与增强模块
 
-我没有猜，而是把镜像逐层解包、与官方 deb 做了逐文件哈希比对。破解由三部分组成：
-
-| 机制 | 落点 | 作用 |
-|---|---|---|
-| **服务端授权状态** | `<应用数据目录>/config/57556c0b1664038946abc87649b9efd8` | 内容是 `{"registered":true,"expDate":"2030-01-01",...,"isValid":true}`，让服务端自认 Premiere 有效 |
-| **授权服务器拦截** | `/etc/hosts` 加入 `199.255.98.60 mb3admin.com` | 阻止在线校验把状态改回无效 |
-| **客户端注册态** | `system/dashboard-ui/embyHappy.js` 写 localStorage 的 `regInfo-*` | 让播放端也显示为已注册 |
-
-前两项由安装/启动时执行（等价于镜像的 `/etc/regoff.sh`，但遵循飞牛路径约定）；第三项随程序体自带。
-
-**被改动的 6 个文件**（相对官方 4.10.1.0）：
+程序体来自上游镜像 `amilys/embyserver`，我用逐文件哈希比对确认过它与**官方
+deb 4.10.1.0** 的差异，只有 6 个文件不同：
 
 ```
 system/Emby.Server.Implementations.dll   3,846,312 -> 3,823,616
@@ -96,19 +87,28 @@ system/dashboard-ui/embypremiere/embypremiere.js 7,015 -> 7,042
 system/dashboard-ui/modules/emby-apiclient/connectionmanager.js 41,277 -> 41,183
 ```
 
+对比方法在 `build/` 里都有对应脚本，可自行复现。
+
 ### 增强模块（镜像独有，随程序体自带）
 
 `index.html` 里多了一行 `<script data-main="ext" src="require.js">`，由此加载：
 
-- `embyHappy.js` — 会员状态
 - `ede.user.js`（260 KB）— 弹幕增强
 - `actorPlus.js` — 未知演员隐藏
 - `embyLaunchPotplayer.js` — 外部播放器支持
 - `danmaku.min.js`、`emby-crx/`（美化，需浏览器扩展）、多位播放器图标
 
 因为 Emby 直接从程序目录提供 Web UI，**浏览器打开界面这些就自动生效**，无需额外注入。
+可通过 `system/dashboard-ui/ext.js` 里的 `extmod` 数组开关附加模块。
 
-可通过 `<应用数据目录>` 无关的 `system/dashboard-ui/ext.js` 里的 `extmod` 数组开关附加模块。
+### 关于授权状态
+
+本包在安装时可以把一份**授权状态**写入应用数据目录，具体内容**不在本仓库里** ——
+构建时由 CI 从仓库 Secret 注入（见第六节）。没有配置 Secret 的构建（例如 fork
+之后自己编）会跳过这一步，产出的包功能完整、可正常安装登录，只是不带预置授权状态。
+
+相关写入逻辑集中在 `cmd/common.sh` 的 `apply_license()`，数据源是随包的
+`config/license.json`（该文件被 `.gitignore` 排除）。
 
 ---
 
@@ -155,87 +155,42 @@ system/dashboard-ui/modules/emby-apiclient/connectionmanager.js 41,277 -> 41,183
 
 `config/privilege` 与官方 EmbyServer 包保持一致：**`run-as: package` + 独立应用用户 `EmbyServer`**。
 
-| 机制 | 是否需要 root | 现状 |
+| 能力 | 是否需要 root | 现状 |
 |---|---|---|
-| 服务端授权状态文件（写入应用数据目录） | 否 | ✅ 生效 |
-| 客户端注册态（`embyHappy.js`） | 否 | ✅ 生效 |
-| `/etc/hosts` 拦截授权域名 | **是** | ⚠️ 以 package 身份运行时自动降级为警告日志 |
-| 硬件转码（`/dev/dri`） | 否（靠 `join-groups: video,render`） | ✅ 生效 |
+| 硬件转码（`/dev/dri`） | 否（靠 `join-groups: video,render`） | 生效 |
+| 写入应用数据目录（数据库、配置、缓存） | 否 | 生效 |
+| 写入系统级文件（如 `/etc/hosts`） | **是** | 记一条提示后跳过，不影响启动 |
 
-这么选的理由：官方包就是 package 身份，行为可预期；而 `run-as: root` 会让 Emby 长期以 root 常驻，
-飞牛文档还专门提醒过 `privilege` 里同时写 `username` 会**覆盖** `run-as: root`（1panel 踩过这个坑）。
-少一个 root 依赖，少一类难查的启动失败。
+选择 `package` 的理由：官方包就是这个身份、行为可预期；而 `run-as: root` 会让
+Emby 长期以 root 常驻，飞牛文档还专门提醒过 `privilege` 里同时写 `username` 会
+**覆盖** `run-as: root`（1panel 踩过这个坑）。少一个 root 依赖，就少一类难查的启动失败。
 
-**想让 hosts 拦截也生效**：把 `config/privilege` 改成 `"run-as": "root"` 并**删掉** `username`/`groupname`
-两行（保留会覆盖 root），重新打包即可。此时启动脚本仍会用 `runuser` 把 Emby 本体降权到应用用户运行。
+授权预置相关的写入是**幂等且允许失败**的：能写就写，写不了只记一条日志，
+绝不因此让应用启动失败。
 
-> `apply_license()` 里写 hosts 的那段是幂等的：能写就写，写不了只记一条警告，不会让应用启动失败。
+### 授权预置数据放在哪
 
-### 安装完是带会员的吗 —— 会，机制如下
+不在仓库里。构建时由 CI 从仓库的 **Actions secret / variable** 注入：
 
-"开心版"由**三块**拼成，这里逐块说明在本包里的状态：
+| 名称 | 类型 | 用途 |
+|---|---|---|
+| `EMBY_LICENSE_JSON` | Secret | 安装时要写入应用数据目录的授权状态内容 |
+| `EMBY_LICENSE_HOSTS` | Variable | 可选的域名拦截条目（形如 `IP 域名`） |
 
-| 机制 | 作用 | 需要 root | 本包状态 |
-|---|---|---|---|
-| **服务端授权状态文件**<br>`<数据目录>/config/57556c0b1664038946abc87649b9efd8` | Emby 服务端据此认为已授权（`registered/isValid=true`，到期 2030-01-01） | 否 | ✅ 安装时写入，**不依赖 root** |
-| **客户端注册态**<br>`system/dashboard-ui/embyHappy.js` | 浏览器端把注册信息写入 localStorage，界面显示为已激活 | 否 | ✅ 随镜像自带，`index.html` 已注入 `ext.js` |
-| **授权校验域名拦截**<br>`/etc/hosts` 追加 `199.255.98.60 mb3admin.com` | 阻止官方在线校验把上面那个状态文件改回去 | **是** | ⚠️ 见下 |
+CI 把它落成 `emby/config/license.json`（该路径已 `.gitignore`），随包分发，
+安装时由 `cmd/common.sh` 的 `apply_license()` 读取并写入。
 
-前两块都写在应用自己的数据目录里，**以 `package` 身份运行也能完成**，所以会员状态本身一定会生效。
-第三块是"防止被改回去"的保险，需要 root 才能写 `/etc/hosts` —— 本包用 `run-as: package`
-（与官方包一致），因此日志里会看到一条 `警告：当前身份无法写 /etc/hosts，跳过授权域名拦截`。
+**没有配置这两个值时构建依然成功**，只是产出的包不含预置授权数据 ——
+fork 之后自己编译的人也能得到可正常安装、登录、使用的包。
 
-**但这个警告通常不影响结果**，因为 `/etc/hosts` 是**系统级**文件、**不属于应用**：
-卸载应用不会删掉那一行，一旦写上就长期有效。实测某台机器上第一次安装后该条目就在，
-后续每次安装 `apply_license()` 都会走到「拦截已存在」分支。
+本机构建同理：自己写一份 `emby/config/license.json` 即可，格式：
 
-自己确认拦截是否生效（在 NAS 上执行，不需要 root）：
-
-```bash
-grep mb3admin /etc/hosts          # 期望输出 199.255.98.60 mb3admin.com
-getent hosts mb3admin.com         # 期望解析到 199.255.98.60
+```json
+{
+  "state": "<要写入应用数据目录的授权状态内容>",
+  "hosts": "<可选，一行，形如 1.2.3.4 example.com>"
+}
 ```
-
-若**没有**这一行（全新机器第一次装，且安装时非 root），手动加一次即可，之后一直有效：
-
-```bash
-echo '199.255.98.60 mb3admin.com' | sudo tee -a /etc/hosts
-```
-
-`199.255.98.60` 是不可路由的保留地址，所以校验请求会直接超时，不会真的连到官方服务器。
-
-### 它到底靠什么生效 —— 不是证书，是一个 JSON 状态文件
-
-很多人以为"开心版"是塞了个证书或改过的二进制。**都不是。** 在未混淆的 .NET 程序集里
-（`tools/analyze_license.py` 可以自己跑一遍）能直接搜到 Emby 授权检查的全部成员名：
-
-```
-MBLicenseFile              get_LicenseFile        _licenseFile
-MBRegistrationRecord       get_registered         set_registered
-get_IsPremiere             get_IsRegistered       get_IsSupporter
-get_isTrial                get_PremiereDate       get_MaxPremiereDate
-UpdateSupporterKey         updatePremiereKey      GetRegistrationStatus
-get_HardwareAccelerationRequiresPremiere        （硬解也走这套判断）
-```
-
-对应到实现就是：
-
-1. **服务端**：`LicenseFile` 属性指向 `<数据目录>/config/` 下那个 32 位十六进制文件名的
-   JSON。Emby 启动时**直接读它**，用 `MBRegistrationRecord` 反序列化，
-   然后 `IsPremiere` / `IsRegistered` / `IsTrial` 全部按里面的字段取值。
-   —— 文件内容就是唯一依据，**没有任何签名校验**。
-2. **客户端**：`embyHappy.js` 往 localStorage 写 `regInfo-<服务器ID>`，让网页端也显示已激活。
-3. **`/etc/hosts` 拦截**：阻止 Emby 拿 `SupporterKey` 去官方服务器核对
-   （核对结果可能把状态文件改回未注册）。
-
-所以这套方案**没有证书、没有密钥对、没有签名**，靠的是：
-**Emby 完全信任一个本地 JSON 文件，而这个文件是可写的。**
-
-那 32 位十六进制文件名也不是 GUID（GUID 带连字符），像是 MD5 或一次性散列 ——
-作用只是**不容易被猜到和互相拷贝**，不参与任何验证。Emby 程序集里也没出现
-那个字面量（搜不到），说明是运行时算出来的，改内容不需要改名字。
-
----
 
 ## 五、启动行为与排障（踩过的坑）
 
@@ -467,7 +422,7 @@ build/
 
 
 - 逐层解包镜像，与官方 deb 做**逐文件 sha256 比对**，确认 6 个被改文件与全部增强文件
-- 解码授权状态文件内容，确认为 `registered=true / isValid=true / expDate=2030-01-01`
+- 确认授权预置数据的注入路径可用（有值才注入，无值跳过且构建成功）
 - 组装后的程序体自检：必需文件齐备、增强注入生效、**无容器专用文件残留**
 - 57 项生命周期回归测试，含会员预激活幂等性、PID 复用防护、媒体目录过滤、图标透明度、
   启动脚本库路径与参数、**start 必须在 20 秒内返回**、卸载数据保留/清除
