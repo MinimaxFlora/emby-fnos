@@ -131,7 +131,8 @@ apply_license >/dev/null 2>&1; rc=$?
 # 2b. 有 license.json 时应写入，且内容来自文件而不是脚本里的常量
 [ -f "${SANDBOX}/license.bak" ] && mv -f "${SANDBOX}/license.bak" "${EMBY_LICENSE_DATA}"
 if [ -f "${EMBY_LICENSE_DATA}" ]; then
-    # 用一份自己造的假数据，确认写进去的就是文件里的内容
+    # 用一份自己造的假数据（文件名刻意用 000...test 占位，便于和真实值区分，
+    # 也保证仓库里不出现任何真实标识），确认写进去的就是文件里的内容
     printf '%s' '{"filename":"0000000000000000000000000000test","state":"{\"registered\":true,\"marker\":\"from-config\",\"isValid\":true}","hosts":""}' \
         > "${SANDBOX}/license.json"
     cp -f "${SANDBOX}/license.json" "${EMBY_LICENSE_DATA}"
