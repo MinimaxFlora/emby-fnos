@@ -382,14 +382,27 @@ teardown_env
 
 # ---------------------------------------------------------------------------
 head_ "7. 配置变更回调与卸载"
+# 必须重新 setup_env：上一组末尾的 teardown_env 会把 SANDBOX 等变量清掉，
+# 少了这一句 ${SANDBOX} 就是空的，路径会变成 "/shares/..."。
+# Git Bash 下 MSYS 会把它当成 Windows 路径从而"看起来正常"，WSL 下则直接
+# mkdir 失败（实测踩过），所以这里显式重建环境。
+setup_env
 prepare_dirs
 # shellcheck disable=SC1091
 . "${PKG}/cmd/service-setup"
-mkdir -p "${SANDBOX}/shares/新增影视"
-export TRIM_DATA_SHARE_PATHS="${SANDBOX}/shares/新增影视"
+
+# 防线：沙盒必须建立成功，否则后面所有路径断言都不可信
+[ -n "${SANDBOX}" ] && [ -d "${SANDBOX}" ] \
+    && ok "测试沙盒已就绪（${SANDBOX}）" \
+    || bad "测试沙盒未建立：SANDBOX='${SANDBOX}'（漏了 setup_env？）"
+
+# 用纯 ASCII 目录名：中文名在 Git Bash / WSL / CI 之间的字节编码可能不一致，
+# grep 匹配会随机失败（踩过）。测试要验的是「路径刷新」而不是编码。
+mkdir -p "${SANDBOX}/shares/newmedia"
+export TRIM_DATA_SHARE_PATHS="${SANDBOX}/shares/newmedia"
 service_postconfig >/dev/null 2>&1; rc=$?
 [ "${rc}" -eq 0 ] && ok "未运行时 config_callback 正常返回 0" || bad "config_callback 返回 ${rc}"
-grep -q "新增影视" "${EMBY_DATA}/media-paths.txt" 2>/dev/null \
+grep -q "newmedia" "${EMBY_DATA}/media-paths.txt" 2>/dev/null \
     && ok "新授权目录已刷新进清单" || bad "新授权目录未刷新"
 
 # 数据保留 / 清除
@@ -436,7 +449,9 @@ done
 # 图标必须是官方标识且带透明背景。真机踩过：从 Emby 的
 # dashboard icon-512x512.png 生成出来的图标背景是实心黑（alpha 全 255），
 # fnOS 会给不透明图标套一层圆角方块，最终显示成"绿色圆角方块"而非官方菱形。
-if [ -n "${PY}" ]; then
+# 先确认解释器里真的有 Pillow。没有就跳过 —— 否则 import 失败会被误判成
+# 「图标不合格」，在白跑一次 CI 后才被发现（踩过）。
+if [ -n "${PY}" ] && "${PY}" -c "import PIL" >/dev/null 2>&1; then
     icon_bad=0
     for f in "${PKG}/ICON.PNG" "${PKG}/ICON_256.PNG" \
              "${SRC}/app-assets/ui/images/64.png" "${SRC}/app-assets/ui/images/256.png"; do
@@ -456,7 +471,16 @@ sys.exit(0 if lo <= 8 and im.size[0] == im.size[1] else 1)
     done
     [ "${icon_bad}" -eq 0 ] && ok "全部图标均为官方标识且带透明背景"
 else
-    skip "未找到 python/Pillow，跳过图标透明度校验"
+    # 退一步：至少校验 PNG 头部与正方形尺寸，不依赖 Pillow
+    png_bad=0
+    for f in "${PKG}/ICON.PNG" "${PKG}/ICON_256.PNG" \
+             "${SRC}/app-assets/ui/images/64.png" "${SRC}/app-assets/ui/images/256.png"; do
+        [ -f "${f}" ] || { bad "缺少图标 ${f}"; png_bad=1; continue; }
+        sig="$(od -An -tx1 -N8 "${f}" 2>/dev/null | tr -d ' \n')"
+        [ "${sig}" = "89504e470d0a1a0a" ] || { bad "${f} 不是合法 PNG"; png_bad=1; }
+    done
+    [ "${png_bad}" -eq 0 ] && ok "图标均为合法 PNG（未装 Pillow，跳过透明度校验）"
+    skip "无 Pillow，未校验图标透明背景（CI 里会装 Pillow 并校验）"
 fi
 
 if grep -q 'images/{0}.png' "${SRC}/app-assets/ui/config"; then

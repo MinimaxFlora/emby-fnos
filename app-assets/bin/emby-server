@@ -170,16 +170,28 @@ SHARE_DIR="/var/apps/${TRIM_APPNAME:-emby}/shares/${TRIM_APPNAME:-emby}"
 # ---------------------------------------------------------------------------
 # 启动并原地等待
 # ---------------------------------------------------------------------------
-if [ -x "${LOCAL_LOADER}" ] || [ -L "${LOCAL_LOADER}" ]; then
+# 判断目标是不是真正的 ELF 可执行文件。
+# 只有 ELF 才需要（也才能）经加载器拉起；shell 脚本交给加载器会直接失败，
+# 所以这里做一次判定 —— 回归测试用的桩就是 bash 脚本，生产环境是真 ELF。
+is_elf() {
+    [ -f "$1" ] || return 1
+    # ELF 魔数：0x7F 'E' 'L' 'F'
+    head -c 4 "$1" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' | grep -qi '^7f454c46$'
+}
+
+TARGET="${SYSTEM_DIR}/EmbyServer"
+
+if is_elf "${TARGET}" && { [ -f "${LOCAL_LOADER}" ] || [ -L "${LOCAL_LOADER}" ]; }; then
     # 相对路径调用：让 .NET 在 system/ 目录里找到 EmbyServer.dll
     ( cd "${SYSTEM_DIR}" && exec "./$(basename "${LOCAL_LOADER}")" \
         --library-path "${SYSTEM_DIR}" "./EmbyServer" "${ARGS[@]}" ) &
-elif [ -n "${LOADER}" ]; then
+elif is_elf "${TARGET}" && [ -n "${LOADER}" ]; then
     note "警告：加载器未能放入 system/，回退为绝对路径调用（可能找不到 EmbyServer.dll）"
-    "${LOADER}" --library-path "${SYSTEM_DIR}" "${SYSTEM_DIR}/EmbyServer" "${ARGS[@]}" &
+    "${LOADER}" --library-path "${SYSTEM_DIR}" "${TARGET}" "${ARGS[@]}" &
 else
-    note "警告：未找到系统加载器，尝试直接执行（PT_INTERP 缺失时必然失败）"
-    "${SYSTEM_DIR}/EmbyServer" "${ARGS[@]}" &
+    # 非 ELF（例如测试桩脚本）或找不到加载器：直接执行
+    [ -n "${LOADER}" ] || note "警告：未找到系统加载器，直接执行（真实 ELF 会因 PT_INTERP 缺失而失败）"
+    "${TARGET}" "${ARGS[@]}" &
 fi
 child=$!
 

@@ -290,7 +290,7 @@ powershell -ExecutionPolicy Bypass -File build\build-native.ps1 -SkipPayloadBuil
 也可以完全绕过 PowerShell，直接在 WSL 里组装负载：
 
 ```bash
-wsl -e bash -lc "cd /mnt/d/.../emby && bash build/build_in_wsl.sh all"
+wsl -e bash -lc "cd /mnt/d/.../emby && bash build/build_payload.sh all"
 ```
 
 ### 流水线
@@ -307,7 +307,7 @@ wsl -e bash -lc "cd /mnt/d/.../emby && bash build/build_in_wsl.sh all"
 ### 校验
 
 ```bash
-bash build/test-native.sh          # 56 项生命周期回归测试
+bash build/test-native.sh          # 57 项生命周期回归测试
 python build/make_icons.py         # 重新生成图标（会写到 emby/ 与 app-assets/）
 ```
 
@@ -348,8 +348,8 @@ app-assets/                  ← 手工维护、构建时覆盖到 app/ 的文�
 └── ui/                      ← 桌面入口 config 与官方图标（64.png / 256.png）
 
 build/
-├── build-native.ps1         ← 主构建（纯 ASCII：PS 5.1 的编码限制，见文件头注释）
-├── build_in_wsl.sh          ← WSL 内的负载组装流水线
+├── build_payload.sh         ← 平台中立的负载组装流水线（CI 与 WSL 共用同一个脚本）
+├── build-native.ps1         ← Windows 侧主构建（纯 ASCII：PS 5.1 的编码限制，见文件头注释）
 ├── build_native.py          ← 合并镜像树与 deb；链接解引用为实体文件
 ├── split_libs.py            ← 按真机结论拆分库目录（剔除随包 libc/loader）
 ├── export_image_tree.py     ← 逐层导出镜像文件系统（保留符号链接）
@@ -357,7 +357,7 @@ build/
 ├── check_elf.py             ← ELF 解释器/依赖/GLIBC 静态体检
 ├── fetch_official_icons.py  ← 获取官方图标并校验透明背景
 ├── nas_ssh.py / nas_put.py  ← 真机排查与上传（paramiko）
-└── test-native.sh           ← 56 项回归测试
+└── test-native.sh           ← 57 项回归测试
 ```
 
 ---
@@ -381,7 +381,7 @@ build/
 - 逐层解包镜像，与官方 deb 做**逐文件 sha256 比对**，确认 6 个被改文件与全部增强文件
 - 解码授权状态文件内容，确认为 `registered=true / isValid=true / expDate=2030-01-01`
 - 组装后的程序体自检：必需文件齐备、增强注入生效、**无容器专用文件残留**
-- 56 项生命周期回归测试，含会员预激活幂等性、PID 复用防护、媒体目录过滤、图标透明度、
+- 57 项生命周期回归测试，含会员预激活幂等性、PID 复用防护、媒体目录过滤、图标透明度、
   启动脚本库路径与参数、**start 必须在 20 秒内返回**、卸载数据保留/清除
 - 两个 FPK 由官方 `fnpack 1.2.3` 成功打包，ELF 架构逐文件核对无串包
 - 4 张图标与官方包逐字节 sha256 一致且带透明背景
