@@ -21,9 +21,9 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
-  schedule:
-    # 每天 03:17 (UTC) 自动检查上游是否有新版本
-    - cron: '17 3 * * *'
+#  schedule:
+# 每天 03:17 (UTC) 自动检查上游是否有新版本
+#    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
       emby_version:
